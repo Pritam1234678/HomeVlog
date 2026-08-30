@@ -1,0 +1,40 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.crt
+*.cer
+id_rsa*
+id_ed25519*
+id_ecdsa*
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Command Code
+.commandcode/
+
+# Frontend build/deps
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
