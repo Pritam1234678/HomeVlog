@@ -19,6 +19,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -226,6 +227,21 @@ async def _lifespan(_app):
 
 
 app = FastAPI(title="PredictShield AI Engine", version="0.2.0", lifespan=_lifespan)
+
+# Same origins as the HomeVlog backend - the dashboard on www.homevlog.store
+# calls this engine cross-origin (browser CORS applies to fetch + EventSource).
+FRONTEND_ORIGINS = os.getenv(
+    "FRONTEND_ORIGINS",
+    "http://localhost:5173,https://homevlog.store,https://www.homevlog.store",
+).split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=FRONTEND_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class PredictRequest(BaseModel):
