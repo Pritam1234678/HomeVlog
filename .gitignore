@@ -38,3 +38,9 @@ Thumbs.db
 frontend/node_modules/
 frontend/dist/
 frontend/dist-ssr/
+
+# Datasets (too large for GitHub, 100MB file limit)
+*.pcap_ISCX.csv
+/cicids2017_combined.csv
+/cicids2017_generated_combined.csv
+/cicids2017_training_ready.csv
