@@ -8,6 +8,7 @@ import Signup from './pages/Signup.jsx'
 import Dashboard from './pages/Dashboard.jsx'
 import Feed from './pages/Feed.jsx'
 import VlogDetail from './pages/VlogDetail.jsx'
+import AdminReport from './pages/AdminReport.jsx'
 import NotFound from './pages/NotFound.jsx'
 
 export default function App() {
@@ -53,6 +54,14 @@ export default function App() {
           element={
             <ProtectedRoute>
               <VlogDetail />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/report"
+          element={
+            <ProtectedRoute>
+              <AdminReport />
             </ProtectedRoute>
           }
         />

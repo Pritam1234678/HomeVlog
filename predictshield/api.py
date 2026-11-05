@@ -9,14 +9,17 @@ Per flow (77 CICFlowMeter features):
 Artifacts live in ./models - see models/README.md. Missing artifacts degrade
 gracefully: /ai/predict answers with model_status="not_deployed".
 """
+import asyncio
 import json
 import os
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List
 
 import numpy as np
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -68,6 +71,76 @@ _state: Dict[str, Any] = {
     "label_map": {},
     "buffers": {},
 }
+
+# In-memory live monitor: every real verdict is recorded here so the
+# /admin/report dashboard can show live stats and the recent attack feed.
+# Deliberately not persisted - restart resets counters (bounded memory).
+_MONITOR: Dict[str, Any] = {
+    "flows_total": 0,
+    "attacks_total": 0,
+    "by_class": {},
+    "by_risk": {"HIGH": 0, "MEDIUM": 0, "LOW": 0},
+    "devices": {},                          # device_id -> last epoch ts
+    "recent_flows": deque(maxlen=5000),     # (ts, is_attack) for last-hour stats
+    "alerts": deque(maxlen=1000),           # attack verdicts, oldest -> newest
+}
+
+
+def _record(device_id: str, resp: PredictResponse) -> None:
+    """Record a real verdict (warmup_xgboost / fusion_5model) into the monitor."""
+    if resp.model_status not in ("warmup_xgboost", "fusion_5model"):
+        return
+    now = time.time()
+    is_attack = resp.attack_class not in ("BENIGN", "unknown")
+    _MONITOR["flows_total"] += 1
+    _MONITOR["recent_flows"].append((now, is_attack))
+    devices = _MONITOR["devices"]
+    devices[device_id] = now
+    if len(devices) > 500:
+        cutoff = now - 7200
+        for key in [k for k, t in devices.items() if t < cutoff]:
+            devices.pop(key, None)
+    if is_attack:
+        _MONITOR["attacks_total"] += 1
+        by_class = _MONITOR["by_class"]
+        by_class[resp.attack_class] = by_class.get(resp.attack_class, 0) + 1
+        if resp.risk_level in _MONITOR["by_risk"]:
+            _MONITOR["by_risk"][resp.risk_level] += 1
+        _MONITOR["alerts"].append({
+            "ts": now,
+            "device_id": device_id,
+            "attack_class": resp.attack_class,
+            "confidence": resp.confidence,
+            "risk_level": resp.risk_level,
+            "model_status": resp.model_status,
+            "defense_actions": resp.defense_actions,
+        })
+
+
+def _build_stats() -> dict:
+    now = time.time()
+    recent = _MONITOR["recent_flows"]
+    while recent and recent[0][0] < now - 3600:
+        recent.popleft()
+    attacks_last_hour = sum(1 for _, a in recent if a)
+    active_devices = sum(1 for t in _MONITOR["devices"].values() if t >= now - 3600)
+    by_class = dict(sorted(_MONITOR["by_class"].items(), key=lambda kv: -kv[1]))
+    return {
+        "ts": now,
+        "flows_total": _MONITOR["flows_total"],
+        "attacks_total": _MONITOR["attacks_total"],
+        "flows_last_hour": len(recent),
+        "attacks_last_hour": attacks_last_hour,
+        "active_devices": active_devices,
+        "attacks_by_class": by_class,
+        "risk_levels": dict(_MONITOR["by_risk"]),
+        "recent_alerts": list(_MONITOR["alerts"])[-12:][::-1],
+    }
+
+
+def _finish(device_id: str, resp: PredictResponse) -> PredictResponse:
+    _record(device_id, resp)
+    return resp
 
 
 def _load():
@@ -245,6 +318,40 @@ def health():
     }
 
 
+@app.get("/ai/stats")
+def stats():
+    """Aggregate live stats for the /admin/report dashboard."""
+    return _build_stats()
+
+
+@app.get("/ai/alerts")
+def alerts(limit: int = 50):
+    """Recent attack alerts, newest first."""
+    limit = max(1, min(limit, 500))
+    return list(_MONITOR["alerts"])[-limit:][::-1]
+
+
+@app.get("/ai/stream")
+async def stream(interval: float = 2.0):
+    """SSE: push live stats to the dashboard every `interval` seconds."""
+    interval = max(1.0, min(interval, 10.0))
+
+    async def event_gen():
+        while True:
+            yield f"data: {json.dumps(_build_stats())}\n\n"
+            await asyncio.sleep(interval)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @app.post("/ai/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
     x = np.asarray(req.features, dtype=np.float32).reshape(1, -1)
@@ -252,20 +359,22 @@ def predict(req: PredictRequest):
         x = _state["flow_scaler"].transform(x).astype(np.float32)
 
     if _state["xgb"] is None and _state["fusion"] is None:
-        return PredictResponse(
+        return _finish(req.device_id, PredictResponse(
             attack_class="unknown", confidence=0.0, risk_level="LOW",
             path=[], shap={}, defense_actions=[], model_status="not_deployed",
-        )
+        ))
 
     key = req.device_id or "default"
     buf: deque = _state["buffers"].setdefault(key, deque(maxlen=SEQ_LEN))
     buf.append(x[0])
 
     if _state["fusion"] is not None and len(buf) >= SEQ_LEN:
-        return _fusion_verdict(np.stack(buf))
-    if _state["xgb"] is None:
-        return PredictResponse(
+        resp = _fusion_verdict(np.stack(buf))
+    elif _state["xgb"] is None:
+        resp = PredictResponse(
             attack_class="unknown", confidence=0.0, risk_level="LOW",
             path=[], shap={}, defense_actions=[], model_status="warming_up",
         )
-    return _respond(_xgb_proba(buf[-1].reshape(1, -1))[0], "warmup_xgboost")
+    else:
+        resp = _respond(_xgb_proba(buf[-1].reshape(1, -1))[0], "warmup_xgboost")
+    return _finish(req.device_id, resp)

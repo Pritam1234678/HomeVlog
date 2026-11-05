@@ -34,6 +34,11 @@ export default function Navbar() {
               Dashboard
             </NavLink>
           )}
+          {user && (
+            <NavLink to="/admin/report" className={navLinkClass}>
+              Threat Monitor
+            </NavLink>
+          )}
         </div>
 
         <div className="flex items-center gap-3">
