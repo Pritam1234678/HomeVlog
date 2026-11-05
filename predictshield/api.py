@@ -86,7 +86,7 @@ _MONITOR: Dict[str, Any] = {
 }
 
 
-def _record(device_id: str, resp: PredictResponse) -> None:
+def _record(device_id: str, resp: "PredictResponse") -> None:
     """Record a real verdict (warmup_xgboost / fusion_5model) into the monitor."""
     if resp.model_status not in ("warmup_xgboost", "fusion_5model"):
         return
@@ -138,7 +138,7 @@ def _build_stats() -> dict:
     }
 
 
-def _finish(device_id: str, resp: PredictResponse) -> PredictResponse:
+def _finish(device_id: str, resp: "PredictResponse") -> "PredictResponse":
     _record(device_id, resp)
     return resp
 
