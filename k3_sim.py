@@ -141,7 +141,7 @@ def main():
                     if out["attack_class"] != "BENIGN":
                         attacks += 1
                         print(f"  [ATTACK] {out['attack_class']:<18} conf={out['confidence']:.2f} "
-                              f"risk={out['risk_level']:<6} from {args.ip}")
+                              f"risk={out['risk_level']:<6} gnn={out['gnn_risk']}")
                 except Exception as exc:
                     print(f"  [error] {exc}")
             print(f"  burst done: sent={sent} attacks_detected={attacks}")
