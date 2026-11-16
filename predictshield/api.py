@@ -227,112 +227,129 @@ def _db_get_conn():
     return conn
 
 
-def _db_flush(batch: List[Dict[str, Any]]) -> None:
-    """Write one batch of verdicts; on failure drop the batch (in-memory still
-    has it) and force a reconnect next time."""
+def _db_flush(batch: List[Dict[str, Any]], tries: int = 0) -> None:
+    """Write one batch of verdicts atomically; on failure requeue up to 3
+    attempts, then drop (in-memory still has the data)."""
     try:
         conn = _db_get_conn()
         events = [b for b in batch if b["type"] == "flow"]
         alerts = [b for b in batch if b["type"] == "attack"]
         cur = conn.cursor()
-        if events:
-            cur.executemany(
-                "INSERT INTO ai_flow_events (device_id, is_attack) VALUES (%s, %s)",
-                [(b["device_id"], b["is_attack"]) for b in events],
-            )
-            conn.execute(
-                "UPDATE ai_counters SET flows_total = flows_total + %s WHERE id = 1",
-                (len(events),),
-            )
-            hour_flows = Counter(b["hour"] for b in events)
-            hour_attacks = Counter(b["hour"] for b in events if b["is_attack"])
-            for hour, flows in hour_flows.items():
-                conn.execute(
-                    """
-                    INSERT INTO ai_hourly (bucket, flows, attacks)
-                    VALUES (date_trunc('hour', now()), %s, %s)
-                    ON CONFLICT (bucket) DO UPDATE SET
-                        flows = ai_hourly.flows + EXCLUDED.flows,
-                        attacks = ai_hourly.attacks + EXCLUDED.attacks
-                    """,
-                    (flows, hour_attacks.get(hour, 0)),
+        with conn.transaction():
+            if events:
+                cur.executemany(
+                    "INSERT INTO ai_flow_events (device_id, is_attack) VALUES (%s, %s)",
+                    [(b["device_id"], b["is_attack"]) for b in events],
                 )
-        if alerts:
-            import psycopg
-
-            cur.executemany(
-                """
-                INSERT INTO ai_alerts
-                    (device_id, attack_class, confidence, risk_level, model_status, defense_actions)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                [
-                    (
-                        b["device_id"], b["attack_class"], b["confidence"],
-                        b["risk_level"], b["model_status"],
-                        psycopg.Json(b["defense_actions"]),
+                conn.execute(
+                    "UPDATE ai_counters SET flows_total = flows_total + %s WHERE id = 1",
+                    (len(events),),
+                )
+                hour_flows = Counter(b["hour"] for b in events)
+                hour_attacks = Counter(b["hour"] for b in events if b["is_attack"])
+                for hour, flows in hour_flows.items():
+                    conn.execute(
+                        """
+                        INSERT INTO ai_hourly (bucket, flows, attacks)
+                        VALUES (date_trunc('hour', now()), %s, %s)
+                        ON CONFLICT (bucket) DO UPDATE SET
+                            flows = ai_hourly.flows + EXCLUDED.flows,
+                            attacks = ai_hourly.attacks + EXCLUDED.attacks
+                        """,
+                        (flows, hour_attacks.get(hour, 0)),
                     )
-                    for b in alerts
-                ],
-            )
-            class_totals = Counter(b["attack_class"] for b in alerts)
-            for cls, n in class_totals.items():
-                conn.execute(
-                    """
-                    INSERT INTO ai_class_totals (attack_class, total)
-                    VALUES (%s, %s)
-                    ON CONFLICT (attack_class) DO UPDATE SET
-                        total = ai_class_totals.total + EXCLUDED.total
-                    """,
-                    (cls, n),
-                )
-            risk_totals = Counter(b["risk_level"] for b in alerts)
-            for risk, n in risk_totals.items():
-                conn.execute(
-                    """
-                    INSERT INTO ai_risk_totals (risk_level, total)
-                    VALUES (%s, %s)
-                    ON CONFLICT (risk_level) DO UPDATE SET
-                        total = ai_risk_totals.total + EXCLUDED.total
-                    """,
-                    (risk, n),
-                )
+            if alerts:
+                from psycopg.types.json import Json
 
-        now = time.time()
-        if now - _DB["last_cleanup"] > 300:
-            _DB["last_cleanup"] = now
-            conn.execute(
-                "DELETE FROM ai_flow_events WHERE ts < now() - %s::interval",
-                (f"{DB_RETENTION['flow_events'] // 3600} hours",),
-            )
-            conn.execute(
-                "DELETE FROM ai_alerts WHERE ts < now() - %s::interval",
-                (f"{DB_RETENTION['alerts'] // 86400} days",),
-            )
-            conn.execute(
-                "DELETE FROM ai_hourly WHERE bucket < now() - %s::interval",
-                (f"{DB_RETENTION['hourly'] // 86400} days",),
-            )
+                cur.executemany(
+                    """
+                    INSERT INTO ai_alerts
+                        (device_id, attack_class, confidence, risk_level, model_status, defense_actions)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            b["device_id"], b["attack_class"], b["confidence"],
+                            b["risk_level"], b["model_status"],
+                            Json(b["defense_actions"]),
+                        )
+                        for b in alerts
+                    ],
+                )
+                class_totals = Counter(b["attack_class"] for b in alerts)
+                for cls, n in class_totals.items():
+                    conn.execute(
+                        """
+                        INSERT INTO ai_class_totals (attack_class, total)
+                        VALUES (%s, %s)
+                        ON CONFLICT (attack_class) DO UPDATE SET
+                            total = ai_class_totals.total + EXCLUDED.total
+                        """,
+                        (cls, n),
+                    )
+                risk_totals = Counter(b["risk_level"] for b in alerts)
+                for risk, n in risk_totals.items():
+                    conn.execute(
+                        """
+                        INSERT INTO ai_risk_totals (risk_level, total)
+                        VALUES (%s, %s)
+                        ON CONFLICT (risk_level) DO UPDATE SET
+                            total = ai_risk_totals.total + EXCLUDED.total
+                        """,
+                        (risk, n),
+                    )
+
+            now = time.time()
+            if now - _DB["last_cleanup"] > 300:
+                _DB["last_cleanup"] = now
+                conn.execute(
+                    "DELETE FROM ai_flow_events WHERE ts < now() - %s::interval",
+                    (f"{DB_RETENTION['flow_events'] // 3600} hours",),
+                )
+                conn.execute(
+                    "DELETE FROM ai_alerts WHERE ts < now() - %s::interval",
+                    (f"{DB_RETENTION['alerts'] // 86400} days",),
+                )
+                conn.execute(
+                    "DELETE FROM ai_hourly WHERE bucket < now() - %s::interval",
+                    (f"{DB_RETENTION['hourly'] // 86400} days",),
+                )
     except Exception as exc:
-        print(f"[db] write failed (batch of {len(batch)} dropped): {exc}")
         try:
             if _DB["conn"] is not None:
                 _DB["conn"].close()
         except Exception:
             pass
         _DB["conn"] = None
+        if tries < 2 and _DB["q"] is not None:
+            try:
+                _DB["q"].put({"type": "retry", "items": batch, "tries": tries + 1})
+                print(f"[db] write failed, requeued (attempt {tries + 1}): {exc}")
+                return
+            except queue.Full:
+                pass
+        print(f"[db] write failed, batch of {len(batch)} dropped: {exc}")
 
 
 def _db_writer() -> None:
     while True:
         item = _DB["q"].get()
-        batch = [item]
+        tries = 0
+        if isinstance(item, dict) and item.get("type") == "retry":
+            batch = item["items"]
+            tries = item["tries"]
+        else:
+            batch = [item]
         while len(batch) < 500:
             try:
-                batch.append(_DB["q"].get_nowait())
+                nxt = _DB["q"].get_nowait()
             except queue.Empty:
                 break
-        _db_flush(batch)
+            if isinstance(nxt, dict) and nxt.get("type") == "retry":
+                _db_flush(nxt["items"], nxt["tries"])
+                continue
+            batch.append(nxt)
+        _db_flush(batch, tries)
 
 
 def _db_init() -> None:
