@@ -726,6 +726,7 @@ class PredictResponse(BaseModel):
     shap: Dict[str, float]
     defense_actions: List[str]
     model_status: str
+    gnn_risk: float = 0.0
 
 
 def softmax(x: np.ndarray) -> np.ndarray:
@@ -738,7 +739,7 @@ def _id_to_label(idx: int) -> str:
     return inv.get(idx, str(idx))
 
 
-def _respond(proba: np.ndarray, status: str) -> PredictResponse:
+def _respond(proba: np.ndarray, status: str, gnn_risk: float = 0.0) -> PredictResponse:
     idx = int(np.argmax(proba))
     conf = float(proba[idx])
     cls = _id_to_label(idx)
@@ -751,6 +752,7 @@ def _respond(proba: np.ndarray, status: str) -> PredictResponse:
         shap={},
         defense_actions=list(RISK_ACTIONS.get(cls, ["monitor"])),
         model_status=status,
+        gnn_risk=round(gnn_risk, 6),
     )
 
 
@@ -788,7 +790,7 @@ def _fusion_verdict(seq: np.ndarray, gnn_risk: float = 0.0) -> PredictResponse:
 
     logits = stack["fusion"].run(None, {"features": feats})[0]
     proba = softmax(logits / _state["temperature"])[0]
-    return _respond(proba, "fusion_5model")
+    return _respond(proba, "fusion_5model", gnn_risk)
 
 
 @app.get("/ai/health")
