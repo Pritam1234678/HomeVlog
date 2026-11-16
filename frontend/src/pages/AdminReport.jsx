@@ -1,12 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { API_URL } from '../api.js'
 
-const RISK_STYLES = {
-  HIGH: 'bg-clay/20 text-clay border-clay/40',
-  MEDIUM: 'bg-amber/15 text-amber border-amber/40',
-  LOW: 'bg-forest-light/15 text-forest-light border-forest-light/30',
-}
-
 function timeAgo(ts, refNow) {
   const s = Math.max(0, Math.round((refNow || Date.now() / 1000) - ts))
   if (s < 5) return 'just now'
@@ -20,54 +14,54 @@ function fmtTime(ts) {
   return new Date(ts * 1000).toLocaleTimeString('en-IN', { hour12: false })
 }
 
-function StatCard({ label, value, accent }) {
-  return (
-    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
-      <p className="text-[11px] font-medium uppercase tracking-widest text-paper/50">{label}</p>
-      <p className={`mt-2 font-serif text-3xl font-medium md:text-4xl ${accent || 'text-paper'}`}>
-        {value}
-      </p>
-    </div>
-  )
+const RISK_STYLES = {
+  HIGH: 'bg-clay/10 text-clay border-clay/30',
+  MEDIUM: 'bg-amber/10 text-amber border-amber/30',
+  LOW: 'bg-forest/10 text-forest border-forest/20',
+}
+
+function flagOf(cc) {
+  if (!cc || cc.length !== 2) return '🌐'
+  return String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65))
 }
 
 function AlertRow({ alert, refNow }) {
   const riskStyle = RISK_STYLES[alert.risk_level] || RISK_STYLES.LOW
   return (
-    <li className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 transition hover:border-white/20">
+    <li className="rounded-2xl border border-ink/10 bg-paper p-4 transition hover:border-forest/30">
       <div className="flex flex-wrap items-center gap-2">
-        <span className={`rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${riskStyle}`}>
+        <span
+          className={`rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${riskStyle}`}
+        >
           {alert.risk_level}
         </span>
-        <span className="font-serif text-lg font-medium text-paper">{alert.attack_class}</span>
-        <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10px] text-paper/60">
+        <span className="font-serif text-lg font-medium text-ink">{alert.attack_class}</span>
+        <span className="rounded-full bg-cream px-2 py-0.5 text-[10px] text-smoke">
           {(alert.confidence * 100).toFixed(1)}%
         </span>
-        <span className="ml-auto text-[11px] text-paper/40" title={fmtTime(alert.ts)}>
+        <span className="ml-auto text-[11px] text-smoke" title={fmtTime(alert.ts)}>
           {timeAgo(alert.ts, refNow)}
         </span>
       </div>
-      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-paper/50">
-        <span className="rounded bg-white/5 px-1.5 py-0.5">device: {alert.device_id || 'default'}</span>
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-smoke">
+        <span className="rounded bg-cream px-1.5 py-0.5">device: {alert.device_id || 'default'}</span>
         {alert.src_ip && (
-          <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono">src: {alert.src_ip}</span>
+          <span className="rounded bg-cream px-1.5 py-0.5 font-mono">src: {alert.src_ip}</span>
         )}
-        <span className="rounded bg-white/5 px-1.5 py-0.5">{alert.model_status}</span>
+        <span className="rounded bg-cream px-1.5 py-0.5">{alert.model_status}</span>
       </div>
       <div className="mt-2 flex flex-wrap gap-1.5">
         {(alert.defense_actions || []).map((action) => (
-          <span key={action} className="rounded-full border border-amber/25 bg-amber/10 px-2 py-0.5 text-[10px] text-amber">
+          <span
+            key={action}
+            className="rounded-full border border-forest/20 bg-forest/5 px-2 py-0.5 text-[10px] text-forest"
+          >
             {action}
           </span>
         ))}
       </div>
     </li>
   )
-}
-
-function flagOf(cc) {
-  if (!cc || cc.length !== 2) return '🌐'
-  return String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65))
 }
 
 function TopIpsSection({ topIps, geoMap }) {
@@ -83,41 +77,44 @@ function TopIpsSection({ topIps, geoMap }) {
     byCountry[key].flows += t.flows
     byCountry[key].attacks += t.attacks
   }
-  const countries = Object.entries(byCountry).sort((a, b) => b[1].flows - a[1].flows)
+  const countries = Object.entries(byCountry).sort((a, b) => b[1].attacks - a[1].attacks || b[1].flows - a[1].flows)
 
   return (
-    <section className="mt-6 rounded-3xl border border-white/10 bg-white/[0.03] p-6">
+    <section className="rounded-3xl border border-ink/10 bg-cream/30 p-6">
       <div className="flex items-center justify-between">
-        <h2 className="font-serif text-xl font-medium">Top source IPs</h2>
-        <span className="text-xs text-paper/40">who is talking to this network</span>
+        <h2 className="font-serif text-xl font-medium text-ink">Top source IPs</h2>
+        <span className="text-xs text-smoke">who is talking to this network</span>
       </div>
       <ul className="mt-5 space-y-3">
         {topIps.map((t) => {
           const g = geoMap[t.ip] || {}
+          const flagged = t.attacks > 0
           return (
-            <li key={t.ip} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+            <li key={t.ip} className="rounded-2xl border border-ink/10 bg-paper p-4 transition hover:border-forest/30">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-lg">{flagOf(g.country_code)}</span>
-                <span className="font-mono text-sm font-semibold text-paper">{t.ip}</span>
-                <span className="text-xs text-paper/50">
+                <span className="font-mono text-sm font-semibold text-ink">{t.ip}</span>
+                <span className="text-xs text-smoke">
                   {g.city ? `${g.city}, ` : ''}{g.country || ''}
                 </span>
-                <span className="ml-auto rounded-full bg-white/5 px-2 py-0.5 text-[10px] text-paper/60">
+                {flagged ? (
+                  <span className="rounded-full border border-clay/30 bg-clay/10 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-clay">
+                    Flagged
+                  </span>
+                ) : (
+                  <span className="rounded-full border border-forest/20 bg-forest/10 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-forest">
+                    Normal
+                  </span>
+                )}
+                <span className="ml-auto rounded-full bg-cream px-2 py-0.5 text-[10px] text-smoke">
                   {t.flows} flows · {t.attacks} attacks
                 </span>
               </div>
-              <div className="mt-2 flex items-center gap-2">
-                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
-                  <div
-                    className="h-full rounded-full bg-forest-light"
-                    style={{ width: `${(t.flows / maxFlows) * 100}%` }}
-                  />
-                </div>
-                {t.gnn_risk != null && t.gnn_risk > 0 && (
-                  <span className="rounded-full border border-amber/30 bg-amber/10 px-2 py-0.5 text-[10px] text-amber">
-                    GNN risk {t.gnn_risk}
-                  </span>
-                )}
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-ink/10">
+                <div
+                  className={`h-full rounded-full ${flagged ? 'bg-clay' : 'bg-forest/60'}`}
+                  style={{ width: `${(t.flows / maxFlows) * 100}%` }}
+                />
               </div>
             </li>
           )
@@ -126,12 +123,12 @@ function TopIpsSection({ topIps, geoMap }) {
 
       {countries.length > 0 && (
         <>
-          <h3 className="mt-7 font-serif text-lg font-medium">Location overview</h3>
+          <h3 className="mt-7 font-serif text-lg font-medium text-ink">Location overview</h3>
           <div className="mt-3 flex flex-wrap gap-2">
             {countries.map(([country, v]) => (
               <span
                 key={country}
-                className="rounded-full border border-white/10 bg-white/5 px-3.5 py-1.5 text-xs text-paper/80"
+                className="rounded-full border border-ink/10 bg-paper px-3.5 py-1.5 text-xs text-ink"
               >
                 {flagOf(v.cc)} {country} — {v.flows} flows
                 {v.attacks > 0 && <span className="text-clay"> · {v.attacks} attacks</span>}
@@ -237,10 +234,26 @@ export default function AdminReport() {
       setConnected(false)
       return
     }
-    const apply = (data) => {
+    const applyLocal = (data) => {
       if (!data) return
       setStats(data)
       setLastUpdate(Date.now())
+      const ips = (data.top_ips || []).map((t) => t.ip).filter((ip) => ip && !geoCache.current[ip])
+      if (ips.length > 0) {
+        adminFetch(`${API_URL}/ai/geo`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ips }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => {
+            if (d?.results) {
+              Object.assign(geoCache.current, d.results)
+              setGeoMap({ ...geoCache.current })
+            }
+          })
+          .catch(() => {})
+      }
     }
     const fetchHistory = () =>
       adminFetch(`${API_URL}/ai/history?hours=24`)
@@ -257,7 +270,7 @@ export default function AdminReport() {
           }
           return r.ok ? r.json() : null
         })
-        .then(apply)
+        .then(applyLocal)
         .catch(() => {})
 
     fetchOnce()
@@ -286,7 +299,7 @@ export default function AdminReport() {
         stopPolling()
       }
       es.onmessage = (e) => {
-        apply(JSON.parse(e.data))
+        applyLocal(JSON.parse(e.data))
         setConnected(true)
       }
       es.onerror = () => {
@@ -313,49 +326,57 @@ export default function AdminReport() {
 
   const historyEnabled = history?.enabled
   const historyRows = history?.hours || []
-  const nowHour = Math.floor(Date.now() / 3600000)
+  const nowHour = Math.floor((stats?.ts || Date.now() / 1000) / 3600)
   const dayBars = []
   for (let h = 23; h >= 0; h--) {
-    const bucketTs = (nowHour - h) * 3600
     const row = historyRows.find((r) => Math.floor(r.ts / 3600) === nowHour - h)
-    dayBars.push({ ts: bucketTs, flows: row?.flows || 0, attacks: row?.attacks || 0 })
+    dayBars.push({ ts: (nowHour - h) * 3600, flows: row?.flows || 0, attacks: row?.attacks || 0 })
   }
   const maxHourFlows = Math.max(1, ...dayBars.map((b) => b.flows))
 
+  // ---------------------------------------------------------------- admin login
   if (!adminToken) {
     return (
-      <div className="flex min-h-[calc(100vh-73px)] items-center justify-center bg-slate-950 px-6">
-        <div className="w-full max-w-md">
-          <div className="mb-8 text-center">
-            <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-slate-700 bg-slate-900 shadow-lg">
-              <svg
-                className="h-7 w-7 text-slate-300"
-                fill="none"
-                viewBox="0 0 24 24"
-                strokeWidth={1.5}
-                stroke="currentColor"
-                aria-hidden="true"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"
-                />
-              </svg>
-            </div>
-            <h1 className="text-2xl font-semibold text-white">Security Console</h1>
-            <p className="mt-2 text-sm text-slate-400">
-              Threat Monitor · Authorized personnel only
+      <div className="flex min-h-[calc(100vh-73px)]">
+        <div className="hidden flex-1 flex-col justify-between bg-forest p-12 text-paper lg:flex">
+          <div className="flex items-center gap-2">
+            <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-paper/10 font-serif text-xl">
+              H
+            </span>
+            <span className="font-serif text-xl font-semibold">
+              Home<span className="text-clay">Vlog</span>
+            </span>
+          </div>
+          <div>
+            <h2 className="font-serif text-4xl font-medium leading-tight">
+              Threat Monitor.
+              <br />
+              Restricted access.
+            </h2>
+            <p className="mt-4 max-w-sm text-paper/70">
+              Sign in with your administrator account to view live network defences.
             </p>
           </div>
+          <p className="text-sm text-paper/50">
+            © {new Date().getFullYear()} HomeVlog. All rights reserved.
+          </p>
+        </div>
 
-          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-8 shadow-2xl">
-            <form onSubmit={handleAdminLogin} className="space-y-5">
+        <div className="flex flex-1 items-center justify-center bg-paper px-6 py-16">
+          <div className="w-full max-w-md">
+            <p className="mb-3 text-xs font-medium uppercase tracking-[0.2em] text-clay">
+              Restricted
+            </p>
+            <h1 className="font-serif text-4xl font-medium tracking-tight text-ink">
+              Admin sign in
+            </h1>
+            <p className="mt-3 text-sm text-smoke">
+              Threat Monitor · authorized personnel only.
+            </p>
+
+            <form onSubmit={handleAdminLogin} className="mt-8 space-y-5">
               <div>
-                <label
-                  htmlFor="admin-user"
-                  className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-400"
-                >
+                <label htmlFor="admin-user" className="mb-2 block text-sm font-medium text-ink">
                   Username
                 </label>
                 <input
@@ -366,14 +387,11 @@ export default function AdminReport() {
                   value={loginForm.username}
                   onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
                   placeholder="admin@example.com"
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-sm text-white placeholder-slate-500 transition focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                  className="w-full rounded-xl border border-ink/15 bg-paper px-4 py-3 text-ink placeholder:text-smoke/50 transition focus:border-forest focus:outline-none focus:ring-2 focus:ring-forest/20"
                 />
               </div>
               <div>
-                <label
-                  htmlFor="admin-pass"
-                  className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-400"
-                >
+                <label htmlFor="admin-pass" className="mb-2 block text-sm font-medium text-ink">
                   Password
                 </label>
                 <input
@@ -383,279 +401,289 @@ export default function AdminReport() {
                   required
                   value={loginForm.password}
                   onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
-                  placeholder="Enter your password"
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-sm text-white placeholder-slate-500 transition focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                  placeholder="••••••••"
+                  className="w-full rounded-xl border border-ink/15 bg-paper px-4 py-3 text-ink placeholder:text-smoke/50 transition focus:border-forest focus:outline-none focus:ring-2 focus:ring-forest/20"
                 />
               </div>
 
               {loginError && (
-                <p className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+                <p className="rounded-xl border border-clay/30 bg-clay/10 px-4 py-3 text-sm text-clay">
                   {loginError}
                 </p>
               )}
 
               <button
                 type="submit"
-                className="w-full rounded-lg bg-white py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-slate-900"
+                className="w-full rounded-xl bg-forest py-3.5 text-sm font-medium text-paper transition hover:bg-forest/90"
               >
                 Sign in
               </button>
             </form>
           </div>
-
-          <p className="mt-6 text-center text-xs text-slate-600">
-            Restricted area · All activity is monitored and logged
-          </p>
         </div>
       </div>
     )
   }
 
+  // ---------------------------------------------------------------- dashboard
+  const sessionActive = session?.active
+  const sessionStarted = session?.started_at
+  const sessionEnded = session?.ended_at
+  const serverNow = stats?.ts || sessionStarted || Date.now() / 1000
+  const durSec = sessionStarted
+    ? Math.max(0, Math.round((sessionActive ? serverNow : sessionEnded || serverNow) - sessionStarted))
+    : 0
+  const durTxt = `${String(Math.floor(durSec / 60)).padStart(2, '0')}:${String(durSec % 60).padStart(2, '0')}`
+
   return (
-    <div className="min-h-[calc(100vh-73px)] bg-ink text-paper">
-      <div className="mx-auto max-w-6xl px-6 py-10">
-        {/* Header */}
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <p className="mb-2 text-xs font-medium uppercase tracking-[0.25em] text-amber">
-              PredictShield AI
-            </p>
-            <h1 className="font-serif text-4xl font-medium tracking-tight md:text-5xl">
-              Live Threat Monitor
-            </h1>
+    <div className="min-h-[calc(100vh-73px)]">
+      {/* Hero */}
+      <section className="relative overflow-hidden bg-forest">
+        <div className="pointer-events-none absolute -top-24 right-10 h-72 w-72 rounded-full bg-amber/10 blur-3xl" />
+        <div className="relative mx-auto max-w-6xl px-6 py-12">
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p className="mb-3 text-xs font-medium uppercase tracking-[0.25em] text-amber">
+                PredictShield
+              </p>
+              <h1 className="font-serif text-4xl font-medium tracking-tight text-paper md:text-5xl">
+                Live Threat Monitor
+              </h1>
+            </div>
+            <div className="flex items-center gap-3 text-sm">
+              <button
+                onClick={adminLogout}
+                className="rounded-full border border-paper/20 px-3 py-1.5 text-xs text-paper/60 transition hover:border-amber hover:text-amber"
+                title="Clear admin session"
+              >
+                admin logout
+              </button>
+              <span
+                className={`inline-flex h-2.5 w-2.5 rounded-full ${
+                  connected ? 'animate-pulse bg-amber' : 'bg-clay'
+                }`}
+              />
+              <span className={connected ? 'text-amber' : 'text-clay'}>
+                {connected ? 'LIVE' : 'RECONNECTING…'}
+              </span>
+              {lastUpdate && (
+                <span className="text-xs text-paper/50">upd. {fmtTime(lastUpdate / 1000)}</span>
+              )}
+            </div>
           </div>
-          <div className="flex items-center gap-3 text-sm">
-            <button
-              onClick={adminLogout}
-              className="rounded-full border border-white/15 px-3 py-1.5 text-xs text-paper/60 transition hover:border-clay hover:text-clay"
-              title="Clear admin session"
-            >
-              admin logout
-            </button>
-            <span
-              className={`inline-flex h-2.5 w-2.5 rounded-full ${
-                connected ? 'animate-pulse bg-forest-light' : 'bg-clay'
-              }`}
-            />
-            <span className={connected ? 'text-forest-light' : 'text-clay'}>
-              {connected ? 'LIVE' : 'RECONNECTING…'}
-            </span>
-            {lastUpdate && (
-              <span className="text-xs text-paper/40">upd. {fmtTime(lastUpdate / 1000)}</span>
+        </div>
+      </section>
+
+      {/* Session control */}
+      <section className="border-b border-ink/10 bg-paper">
+        <div className="mx-auto max-w-6xl px-6 py-6">
+          <div
+            className={`flex flex-wrap items-center gap-4 rounded-3xl border p-5 transition ${
+              sessionActive
+                ? 'border-forest/30 bg-forest/5'
+                : sessionEnded
+                ? 'border-ink/10 bg-cream/40'
+                : 'border-ink/10 bg-cream/40'
+            }`}
+          >
+            <div className="flex-1 min-w-[240px]">
+              <div className="flex items-center gap-2">
+                {sessionActive ? (
+                  <>
+                    <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-clay" />
+                    <span className="font-serif text-lg font-medium text-ink">
+                      Session live · {durTxt}
+                    </span>
+                  </>
+                ) : sessionEnded ? (
+                  <span className="font-serif text-lg font-medium text-ink">
+                    Session complete · {durTxt}
+                  </span>
+                ) : (
+                  <span className="font-serif text-lg font-medium text-ink">Ready to monitor</span>
+                )}
+              </div>
+              <p className="mt-1 text-xs leading-relaxed text-smoke">
+                {sessionActive
+                  ? 'Counting every flow and attack since you pressed start — fire your test traffic now.'
+                  : sessionEnded
+                  ? 'Summary frozen. Start a new session to reset the counters.'
+                  : 'Press start, then send your test traffic — only what happens after start gets counted.'}
+              </p>
+            </div>
+            {sessionActive ? (
+              <button
+                onClick={stopSession}
+                className="rounded-full border border-clay/40 bg-clay px-6 py-3 text-sm font-semibold text-paper transition hover:bg-clay-dark"
+              >
+                Stop session
+              </button>
+            ) : (
+              <button
+                onClick={startSession}
+                className="rounded-full bg-forest px-7 py-3 text-sm font-semibold text-paper transition hover:bg-forest/90"
+              >
+                Start monitoring
+              </button>
             )}
           </div>
         </div>
+      </section>
 
-        {/* Session control */}
-        {(() => {
-          const active = session?.active
-          const started = session?.started_at
-          const ended = session?.ended_at
-          const serverNow = stats?.ts || session?.started_at || Date.now() / 1000
-          const durSec = started
-            ? Math.max(0, Math.round((active ? serverNow : (ended || serverNow)) - started))
-            : 0
-          const durTxt = `${String(Math.floor(durSec / 60)).padStart(2, '0')}:${String(durSec % 60).padStart(2, '0')}`
-          return (
-            <div
-              className={`mt-6 flex flex-wrap items-center gap-4 rounded-3xl border p-5 transition ${
-                active
-                  ? 'border-amber/40 bg-amber/5'
-                  : ended
-                  ? 'border-forest-light/30 bg-forest-light/5'
-                  : 'border-white/10 bg-white/[0.03]'
-              }`}
-            >
-              <div className="flex-1 min-w-[240px]">
-                <div className="flex items-center gap-2">
-                  {active ? (
-                    <>
-                      <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-amber" />
-                      <span className="font-serif text-lg font-medium text-amber">
-                        SESSION LIVE · {durTxt}
-                      </span>
-                    </>
-                  ) : ended ? (
-                    <span className="font-serif text-lg font-medium text-forest-light">
-                      SESSION COMPLETE · {durTxt}
-                    </span>
-                  ) : (
-                    <span className="font-serif text-lg font-medium text-paper">
-                      Ready to monitor
-                    </span>
-                  )}
+      {/* Stat cards */}
+      <section className="bg-paper">
+        <div className="mx-auto max-w-6xl px-6 pt-10">
+          {!stats ? (
+            <p className="py-16 text-center text-smoke">Connecting to the AI engine…</p>
+          ) : (
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+              {[
+                ['Flows analyzed', (stats.flows_total ?? 0).toLocaleString(), 'text-forest'],
+                ['Attacks detected', (stats.attacks_total ?? 0).toLocaleString(), 'text-clay'],
+                ['Capture nodes', stats.active_devices ?? 0, 'text-ink'],
+                ['Attacks (1h)', (stats.attacks_last_hour ?? 0).toLocaleString(), 'text-amber'],
+              ].map(([label, value, accent]) => (
+                <div key={label} className="rounded-3xl border border-ink/10 bg-cream/30 p-6 text-center">
+                  <p className="font-serif text-3xl font-medium md:text-4xl">
+                    <span className={accent}>{value}</span>
+                  </p>
+                  <p className="mt-1 text-xs uppercase tracking-widest text-smoke">{label}</p>
                 </div>
-                <p className="mt-1 text-xs leading-relaxed text-paper/50">
-                  {active
-                    ? 'Counting every flow and attack SINCE you pressed start - fire your test traffic now.'
-                    : ended
-                    ? 'Summary frozen. Start a new session to reset the counters.'
-                    : 'Press start, then send your test traffic - only what happens after start gets counted.'}
-                </p>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      {stats && (
+        <>
+          <section className="bg-paper">
+            <div className="mx-auto max-w-6xl px-6 py-10">
+              <div className="grid gap-6 lg:grid-cols-5">
+                {/* Attacks by class */}
+                <section className="rounded-3xl border border-ink/10 bg-cream/30 p-6 lg:col-span-2">
+                  <h2 className="font-serif text-xl font-medium text-ink">Attacks by class</h2>
+                  {Object.keys(attacks).length === 0 ? (
+                    <p className="mt-6 text-sm text-smoke">
+                      No attacks detected yet — the network looks quiet.
+                    </p>
+                  ) : (
+                    <ul className="mt-5 space-y-3">
+                      {Object.entries(attacks).map(([cls, count]) => (
+                        <li key={cls}>
+                          <div className="mb-1 flex items-center justify-between text-sm">
+                            <span className="text-ink">{cls}</span>
+                            <span className="font-medium text-ink">{count.toLocaleString()}</span>
+                          </div>
+                          <div className="h-2 overflow-hidden rounded-full bg-ink/10">
+                            <div
+                              className="h-full rounded-full bg-clay transition-all duration-500"
+                              style={{ width: `${(count / maxClass) * 100}%` }}
+                            />
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  <h2 className="mt-8 font-serif text-xl font-medium text-ink">Risk breakdown</h2>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {['HIGH', 'MEDIUM', 'LOW'].map((level) => (
+                      <span
+                        key={level}
+                        className={`rounded-full border px-3.5 py-1.5 text-xs font-semibold ${
+                          RISK_STYLES[level]
+                        }`}
+                      >
+                        {level}: {risks[level] ?? 0}
+                      </span>
+                    ))}
+                  </div>
+                  <p className="mt-6 text-xs leading-relaxed text-smoke">
+                    {sessionActive || sessionEnded
+                      ? `${stats.flows_last_hour ?? 0} flows in this session · history persisted in PostgreSQL.`
+                      : `${stats.flows_last_hour ?? 0} flows analyzed in the last hour · history persisted in PostgreSQL.`}
+                  </p>
+                </section>
+
+                {/* Live alert feed */}
+                <section className="rounded-3xl border border-ink/10 bg-cream/30 p-6 lg:col-span-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="font-serif text-xl font-medium text-ink">Live alert feed</h2>
+                    {connected && (
+                      <span className="flex items-center gap-1.5 text-xs text-forest">
+                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-forest" />
+                        streaming
+                      </span>
+                    )}
+                  </div>
+                  {alerts.length === 0 ? (
+                    <div className="mt-8 rounded-2xl border border-dashed border-ink/15 bg-cream/20 px-6 py-14 text-center">
+                      <span className="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-full bg-forest/10 text-xl text-forest">
+                        ✦
+                      </span>
+                      <p className="font-serif text-xl text-ink">All clear</p>
+                      <p className="mt-1 text-sm text-smoke">
+                        Attack verdicts will appear here the moment the engine flags one.
+                      </p>
+                    </div>
+                  ) : (
+                    <ul className="mt-5 max-h-[520px] space-y-3 overflow-y-auto pr-1">
+                      {alerts.map((alert, i) => (
+                        <AlertRow key={`${alert.ts}-${i}`} alert={alert} refNow={stats?.ts} />
+                      ))}
+                    </ul>
+                  )}
+                </section>
               </div>
-              {active ? (
-                <button
-                  onClick={stopSession}
-                  className="rounded-full border border-clay/40 bg-clay/20 px-7 py-3 text-sm font-bold text-paper transition hover:bg-clay/40"
-                >
-                  ■ STOP SESSION
-                </button>
-              ) : (
-                <button
-                  onClick={startSession}
-                  className="rounded-full bg-amber px-7 py-3 text-sm font-bold text-ink transition hover:bg-amber/90"
-                >
-                  ▶ START MONITORING
-                </button>
+
+              {/* Top source IPs */}
+              <TopIpsSection topIps={stats?.top_ips} geoMap={geoMap} />
+
+              {/* 24h history */}
+              {historyEnabled && (
+                <section className="mt-6 rounded-3xl border border-ink/10 bg-cream/30 p-6">
+                  <div className="flex items-center justify-between">
+                    <h2 className="font-serif text-xl font-medium text-ink">Last 24 hours</h2>
+                    <span className="text-xs text-smoke">persisted in PostgreSQL</span>
+                  </div>
+                  <div className="mt-5 flex h-28 items-end gap-1">
+                    {dayBars.map((b) => (
+                      <div
+                        key={b.ts}
+                        title={`${new Date(b.ts * 1000).toLocaleTimeString('en-IN', {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })} — ${b.flows} flows, ${b.attacks} attacks`}
+                        className="relative flex-1 rounded-t bg-ink/10"
+                        style={{ height: `${Math.max(4, (b.flows / maxHourFlows) * 100)}%` }}
+                      >
+                        {b.attacks > 0 && (
+                          <div
+                            className="absolute bottom-0 w-full rounded-t bg-clay"
+                            style={{
+                              height: `${Math.min(100, (b.attacks / Math.max(1, b.flows)) * 100)}%`,
+                            }}
+                          />
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-2 flex justify-between text-[10px] text-smoke">
+                    <span>24h ago</span>
+                    <span className="flex items-center gap-2">
+                      <span className="inline-block h-2 w-2 rounded-sm bg-clay" /> attacks
+                      <span className="ml-2 inline-block h-2 w-2 rounded-sm bg-forest/40" /> benign
+                      flows
+                    </span>
+                    <span>now</span>
+                  </div>
+                </section>
               )}
             </div>
-          )
-        })()}
-
-        {!stats ? (
-          <p className="mt-24 text-center text-paper/50">Connecting to the AI engine…</p>
-        ) : (
-          <>
-            {/* Stat cards */}
-            <div className="mt-8 grid grid-cols-2 gap-4 md:grid-cols-4">
-              <StatCard label="Flows analyzed" value={(stats.flows_total ?? 0).toLocaleString()} />
-              <StatCard
-                label="Attacks detected"
-                value={(stats.attacks_total ?? 0).toLocaleString()}
-                accent="text-clay"
-              />
-              <StatCard label="Capture nodes" value={stats.active_devices ?? 0} />
-              <StatCard
-                label="Attacks (1h)"
-                value={(stats.attacks_last_hour ?? 0).toLocaleString()}
-                accent="text-amber"
-              />
-            </div>
-
-            <div className="mt-6 grid gap-6 lg:grid-cols-5">
-              {/* Attacks by class */}
-              <section className="rounded-3xl border border-white/10 bg-white/[0.03] p-6 lg:col-span-2">
-                <h2 className="font-serif text-xl font-medium">Attacks by class</h2>
-                {Object.keys(attacks).length === 0 ? (
-                  <p className="mt-6 text-sm text-paper/40">
-                    No attacks detected yet — the network looks quiet.
-                  </p>
-                ) : (
-                  <ul className="mt-5 space-y-3">
-                    {Object.entries(attacks).map(([cls, count]) => (
-                      <li key={cls}>
-                        <div className="mb-1 flex items-center justify-between text-sm">
-                          <span className="text-paper/80">{cls}</span>
-                          <span className="font-medium text-paper">{count.toLocaleString()}</span>
-                        </div>
-                        <div className="h-2 overflow-hidden rounded-full bg-white/10">
-                          <div
-                            className="h-full rounded-full bg-clay transition-all duration-500"
-                            style={{ width: `${(count / maxClass) * 100}%` }}
-                          />
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-
-                <h2 className="mt-8 font-serif text-xl font-medium">Risk breakdown</h2>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {['HIGH', 'MEDIUM', 'LOW'].map((level) => (
-                    <span
-                      key={level}
-                      className={`rounded-full border px-3.5 py-1.5 text-xs font-semibold ${
-                        RISK_STYLES[level]
-                      }`}
-                    >
-                      {level}: {risks[level] ?? 0}
-                    </span>
-                  ))}
-                </div>
-                <p className="mt-6 text-xs leading-relaxed text-paper/40">
-                  {session?.active || session?.ended_at
-                    ? `${stats.flows_last_hour ?? 0} flows in this session · history persisted in PostgreSQL.`
-                    : `${stats.flows_last_hour ?? 0} flows analyzed in the last hour · history persisted in PostgreSQL.`}
-                </p>
-              </section>
-
-              {/* Live alert feed */}
-              <section className="rounded-3xl border border-white/10 bg-white/[0.03] p-6 lg:col-span-3">
-                <div className="flex items-center justify-between">
-                  <h2 className="font-serif text-xl font-medium">Live alert feed</h2>
-                  {connected && (
-                    <span className="flex items-center gap-1.5 text-xs text-forest-light">
-                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-forest-light" />
-                      streaming
-                    </span>
-                  )}
-                </div>
-                {alerts.length === 0 ? (
-                  <div className="mt-8 rounded-2xl border border-dashed border-white/15 px-6 py-14 text-center">
-                    <span className="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-full bg-forest/30 text-xl">
-                      ✦
-                    </span>
-                    <p className="font-serif text-xl">All clear</p>
-                    <p className="mt-1 text-sm text-paper/40">
-                      Attack verdicts will appear here the moment the engine flags one.
-                    </p>
-                  </div>
-                ) : (
-                  <ul className="mt-5 max-h-[520px] space-y-3 overflow-y-auto pr-1">
-                    {alerts.map((alert, i) => (
-                      <AlertRow key={`${alert.ts}-${i}`} alert={alert} refNow={stats?.ts} />
-                    ))}
-                  </ul>
-                )}
-              </section>
-            </div>
-
-            {/* Top source IPs + location overview */}
-            <TopIpsSection topIps={stats?.top_ips} geoMap={geoMap} />
-
-            {/* 24h history (persisted in PostgreSQL) */}
-            {historyEnabled && (
-              <section className="mt-6 rounded-3xl border border-white/10 bg-white/[0.03] p-6">
-                <div className="flex items-center justify-between">
-                  <h2 className="font-serif text-xl font-medium">Last 24 hours</h2>
-                  <span className="text-xs text-paper/40">persisted in PostgreSQL</span>
-                </div>
-                <div className="mt-5 flex h-28 items-end gap-1">
-                  {dayBars.map((b) => (
-                    <div
-                      key={b.ts}
-                      title={`${new Date(b.ts * 1000).toLocaleTimeString('en-IN', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })} — ${b.flows} flows, ${b.attacks} attacks`}
-                      className="relative flex-1 rounded-t bg-white/10"
-                      style={{ height: `${Math.max(4, (b.flows / maxHourFlows) * 100)}%` }}
-                    >
-                      {b.attacks > 0 && (
-                        <div
-                          className="absolute bottom-0 w-full rounded-t bg-clay"
-                          style={{
-                            height: `${Math.min(100, (b.attacks / Math.max(1, b.flows)) * 100)}%`,
-                          }}
-                        />
-                      )}
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-2 flex justify-between text-[10px] text-paper/40">
-                  <span>24h ago</span>
-                  <span className="flex items-center gap-2">
-                    <span className="inline-block h-2 w-2 rounded-sm bg-clay" /> attacks
-                    <span className="ml-2 inline-block h-2 w-2 rounded-sm bg-white/20" /> benign
-                    flows
-                  </span>
-                  <span>now</span>
-                </div>
-              </section>
-            )}
-          </>
-        )}
-      </div>
+          </section>
+        </>
+      )}
     </div>
   )
 }
