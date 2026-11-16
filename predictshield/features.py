@@ -90,6 +90,7 @@ FEATURE_ORDER = [
 MIN_DURATION = 0.001
 BULK_IAT_THRESHOLD = 1.0      # seconds
 IDLE_THRESHOLD = 1.0          # seconds
+US = 1_000_000                # CICIDS2017 time features are in microseconds
 
 
 def _stats(values):
@@ -170,7 +171,7 @@ class FeatureExtractor:
 
         features = {
             "Destination Port": flow.dst_port,
-            "Flow Duration": duration,
+            "Flow Duration": duration * US,
             "Total Fwd Packets": fwd_pkts,
             "Total Backward Packets": bwd_pkts,
             "Total Length of Fwd Packets": fwd_bytes,
@@ -185,20 +186,20 @@ class FeatureExtractor:
             "Bwd Packet Length Std": bwd_len_std,
             "Flow Bytes/s": _safe_div(total_bytes, duration),
             "Flow Packets/s": _safe_div(total_pkts, duration),
-            "Flow IAT Mean": flow_iat_mean,
-            "Flow IAT Std": flow_iat_std,
-            "Flow IAT Max": flow_iat_max,
-            "Flow IAT Min": flow_iat_min,
-            "Fwd IAT Total": fwd_iat_total,
-            "Fwd IAT Mean": fwd_iat_mean,
-            "Fwd IAT Std": fwd_iat_std,
-            "Fwd IAT Max": fwd_iat_max,
-            "Fwd IAT Min": fwd_iat_min,
-            "Bwd IAT Total": bwd_iat_total,
-            "Bwd IAT Mean": bwd_iat_mean,
-            "Bwd IAT Std": bwd_iat_std,
-            "Bwd IAT Max": bwd_iat_max,
-            "Bwd IAT Min": bwd_iat_min,
+            "Flow IAT Mean": flow_iat_mean * US,
+            "Flow IAT Std": flow_iat_std * US,
+            "Flow IAT Max": flow_iat_max * US,
+            "Flow IAT Min": flow_iat_min * US,
+            "Fwd IAT Total": fwd_iat_total * US,
+            "Fwd IAT Mean": fwd_iat_mean * US,
+            "Fwd IAT Std": fwd_iat_std * US,
+            "Fwd IAT Max": fwd_iat_max * US,
+            "Fwd IAT Min": fwd_iat_min * US,
+            "Bwd IAT Total": bwd_iat_total * US,
+            "Bwd IAT Mean": bwd_iat_mean * US,
+            "Bwd IAT Std": bwd_iat_std * US,
+            "Bwd IAT Max": bwd_iat_max * US,
+            "Bwd IAT Min": bwd_iat_min * US,
             "Fwd PSH Flags": flow.fwd_psh_count,
             "Bwd PSH Flags": flow.bwd_psh_count,
             "Fwd URG Flags": flow.fwd_urg_count,
@@ -238,14 +239,14 @@ class FeatureExtractor:
             "Init_Win_bytes_backward": float(flow.bwd_init_win if flow.bwd_init_win is not None else 0),
             "act_data_pkt_fwd": sum(1 for s in flow.fwd_seg_lens if s > 0),
             "min_seg_size_forward": min(flow.fwd_seg_lens) if flow.fwd_seg_lens else 0,
-            "Active Mean": active[0],
-            "Active Std": active[1],
-            "Active Max": active[2],
-            "Active Min": active[3],
-            "Idle Mean": idle[0],
-            "Idle Std": idle[1],
-            "Idle Max": idle[2],
-            "Idle Min": idle[3],
+            "Active Mean": active[0] * US,
+            "Active Std": active[1] * US,
+            "Active Max": active[2] * US,
+            "Active Min": active[3] * US,
+            "Idle Mean": idle[0] * US,
+            "Idle Std": idle[1] * US,
+            "Idle Max": idle[2] * US,
+            "Idle Min": idle[3] * US,
         }
         return features
 

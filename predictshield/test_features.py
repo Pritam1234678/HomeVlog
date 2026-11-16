@@ -43,7 +43,7 @@ def test_feature_vector_length_and_spot_checks():
     assert vector[idx["Total Backward Packets"]] == 1
     assert vector[idx["Total Length of Fwd Packets"]] == 100
     assert vector[idx["Destination Port"]] == 22
-    assert vector[idx["Flow Duration"]] == 1.5
+    assert vector[idx["Flow Duration"]] == 1.5e6  # seconds * 1e6 = microseconds
     assert vector[idx["SYN Flag Count"]] == 1
     assert vector[idx["ACK Flag Count"]] == 1
 
@@ -66,7 +66,7 @@ def test_iat_and_ratios():
     features = FeatureExtractor().extract(flow)
     idx = {name: i for i, name in enumerate(FEATURE_ORDER)}
     vec = to_feature_vector(features)
-    assert vec[idx["Fwd IAT Total"]] == 0.5
+    assert vec[idx["Fwd IAT Total"]] == 0.5e6  # microseconds
     assert vec[idx["Down/Up Ratio"]] == 1.0  # 200/200
 
 

@@ -53,6 +53,25 @@ def emit_flow(flow, extractor, args):
     features = extractor.extract(flow)
     vector = to_feature_vector(features)
 
+    # per-flow data for the live GNN (5-second IP graphs + causal risk)
+    topology = {
+        "src_ip": flow.src_ip, "dst_ip": flow.dst_ip,
+        "src_port": flow.src_port, "dst_port": flow.dst_port,
+        "protocol": flow.protocol,
+        "ts": flow.last_time,
+        "duration_us": features["Flow Duration"],
+        "fwd_pkts": features["Total Fwd Packets"],
+        "bwd_pkts": features["Total Backward Packets"],
+        "fwd_bytes": features["Total Length of Fwd Packets"],
+        "bwd_bytes": features["Total Length of Bwd Packets"],
+        "avg_pkt": features["Average Packet Size"],
+        "max_pkt": features["Max Packet Length"],
+        "syn": features["SYN Flag Count"],
+        "rst": features["RST Flag Count"],
+        "fin": features["FIN Flag Count"],
+        "ack": features["ACK Flag Count"],
+    }
+
     if args.no_post:
         print(json.dumps(vector))
         return
@@ -61,7 +80,7 @@ def emit_flow(flow, extractor, args):
         import requests
         resp = requests.post(
             f"{args.api_url}/ai/predict",
-            json={"features": vector, "device_id": args.device_id, "topology": {}},
+            json={"features": vector, "device_id": args.device_id, "topology": topology},
             timeout=5,
         )
         print(f"[{resp.status_code}] flow={flow.key} -> {resp.text}")

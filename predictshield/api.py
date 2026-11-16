@@ -12,8 +12,10 @@ gracefully: /ai/predict answers with model_status="not_deployed".
 import asyncio
 import json
 import os
+import queue
+import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List
 
@@ -43,6 +45,8 @@ FLOW_SCALER_PKL = _path("cicids2017_scaler.pkl")
 FUSION_SCALER_JSON = _path("fusion_scaler.json")
 FUSION_CALIB_JSON = _path("fusion_calib.json")
 LABEL_MAP_JSON = _path("label_map.json")
+GNN_ONNX = _path("gat.onnx")
+GNN_SCALER_JSON = _path("gnn_scaler.json")
 
 RISK_ACTIONS = {
     "BENIGN": ["allow"],
@@ -71,6 +75,7 @@ _state: Dict[str, Any] = {
     "temperature": 1.0,
     "label_map": {},
     "buffers": {},
+    "gnn": None,
 }
 
 # In-memory live monitor: every real verdict is recorded here so the
@@ -95,6 +100,7 @@ def _record(device_id: str, resp: "PredictResponse") -> None:
     is_attack = resp.attack_class not in ("BENIGN", "unknown")
     _MONITOR["flows_total"] += 1
     _MONITOR["recent_flows"].append((now, is_attack))
+    _enqueue_flow(device_id, is_attack)
     devices = _MONITOR["devices"]
     devices[device_id] = now
     if len(devices) > 500:
@@ -107,7 +113,7 @@ def _record(device_id: str, resp: "PredictResponse") -> None:
         by_class[resp.attack_class] = by_class.get(resp.attack_class, 0) + 1
         if resp.risk_level in _MONITOR["by_risk"]:
             _MONITOR["by_risk"][resp.risk_level] += 1
-        _MONITOR["alerts"].append({
+        alert = {
             "ts": now,
             "device_id": device_id,
             "attack_class": resp.attack_class,
@@ -115,7 +121,9 @@ def _record(device_id: str, resp: "PredictResponse") -> None:
             "risk_level": resp.risk_level,
             "model_status": resp.model_status,
             "defense_actions": resp.defense_actions,
-        })
+        }
+        _MONITOR["alerts"].append(alert)
+        _enqueue_alert(alert)
 
 
 def _build_stats() -> dict:
@@ -142,6 +150,280 @@ def _build_stats() -> dict:
 def _finish(device_id: str, resp: "PredictResponse") -> "PredictResponse":
     _record(device_id, resp)
     return resp
+
+
+# ---------------------------------------------------------------------------
+# Persistent history (PostgreSQL). When DATABASE_URL is set, every verdict is
+# queued to a background writer that batches inserts into the same database
+# the HomeVlog platform uses. Stats/alerts read from the DB; if the DB is
+# unreachable the engine falls back to the in-memory monitor above.
+# ---------------------------------------------------------------------------
+DB_URL = os.getenv("DATABASE_URL", "")
+if DB_URL.startswith("postgres://"):
+    DB_URL = "postgresql://" + DB_URL[len("postgres://"):]
+
+_DB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS ai_counters (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    flows_total BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO ai_counters (id, flows_total) VALUES (1, 0)
+    ON CONFLICT (id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS ai_class_totals (
+    attack_class VARCHAR(64) PRIMARY KEY,
+    total BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ai_risk_totals (
+    risk_level VARCHAR(16) PRIMARY KEY,
+    total BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS ai_alerts (
+    id BIGSERIAL PRIMARY KEY,
+    ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+    device_id VARCHAR(100),
+    attack_class VARCHAR(64),
+    confidence REAL,
+    risk_level VARCHAR(16),
+    model_status VARCHAR(32),
+    defense_actions JSONB NOT NULL DEFAULT '[]'::jsonb
+);
+CREATE INDEX IF NOT EXISTS ai_alerts_ts_idx ON ai_alerts (ts DESC);
+CREATE TABLE IF NOT EXISTS ai_flow_events (
+    id BIGSERIAL PRIMARY KEY,
+    ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+    device_id VARCHAR(100),
+    is_attack BOOLEAN NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ai_flow_events_ts_idx ON ai_flow_events (ts DESC);
+CREATE TABLE IF NOT EXISTS ai_hourly (
+    bucket TIMESTAMPTZ PRIMARY KEY,
+    flows BIGINT NOT NULL DEFAULT 0,
+    attacks BIGINT NOT NULL DEFAULT 0
+);
+"""
+
+_DB: Dict[str, Any] = {
+    "enabled": False,
+    "conn": None,
+    "q": None,
+    "last_cleanup": 0.0,
+}
+
+DB_RETENTION = {
+    "flow_events": 2 * 3600,   # only needed for last-hour stats / active devices
+    "alerts": 7 * 86400,       # attack alert history
+    "hourly": 30 * 86400,      # per-hour rollup for the history endpoint
+}
+
+
+def _db_get_conn():
+    conn = _DB["conn"]
+    if conn is not None and not conn.closed:
+        return conn
+    import psycopg
+
+    conn = psycopg.connect(DB_URL, connect_timeout=10, autocommit=True)
+    _DB["conn"] = conn
+    return conn
+
+
+def _db_flush(batch: List[Dict[str, Any]]) -> None:
+    """Write one batch of verdicts; on failure drop the batch (in-memory still
+    has it) and force a reconnect next time."""
+    try:
+        conn = _db_get_conn()
+        events = [b for b in batch if b["type"] == "flow"]
+        alerts = [b for b in batch if b["type"] == "attack"]
+        cur = conn.cursor()
+        if events:
+            cur.executemany(
+                "INSERT INTO ai_flow_events (device_id, is_attack) VALUES (%s, %s)",
+                [(b["device_id"], b["is_attack"]) for b in events],
+            )
+            conn.execute(
+                "UPDATE ai_counters SET flows_total = flows_total + %s WHERE id = 1",
+                (len(events),),
+            )
+            hour_flows = Counter(b["hour"] for b in events)
+            hour_attacks = Counter(b["hour"] for b in events if b["is_attack"])
+            for hour, flows in hour_flows.items():
+                conn.execute(
+                    """
+                    INSERT INTO ai_hourly (bucket, flows, attacks)
+                    VALUES (date_trunc('hour', now()), %s, %s)
+                    ON CONFLICT (bucket) DO UPDATE SET
+                        flows = ai_hourly.flows + EXCLUDED.flows,
+                        attacks = ai_hourly.attacks + EXCLUDED.attacks
+                    """,
+                    (flows, hour_attacks.get(hour, 0)),
+                )
+        if alerts:
+            import psycopg
+
+            cur.executemany(
+                """
+                INSERT INTO ai_alerts
+                    (device_id, attack_class, confidence, risk_level, model_status, defense_actions)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                [
+                    (
+                        b["device_id"], b["attack_class"], b["confidence"],
+                        b["risk_level"], b["model_status"],
+                        psycopg.Json(b["defense_actions"]),
+                    )
+                    for b in alerts
+                ],
+            )
+            class_totals = Counter(b["attack_class"] for b in alerts)
+            for cls, n in class_totals.items():
+                conn.execute(
+                    """
+                    INSERT INTO ai_class_totals (attack_class, total)
+                    VALUES (%s, %s)
+                    ON CONFLICT (attack_class) DO UPDATE SET
+                        total = ai_class_totals.total + EXCLUDED.total
+                    """,
+                    (cls, n),
+                )
+            risk_totals = Counter(b["risk_level"] for b in alerts)
+            for risk, n in risk_totals.items():
+                conn.execute(
+                    """
+                    INSERT INTO ai_risk_totals (risk_level, total)
+                    VALUES (%s, %s)
+                    ON CONFLICT (risk_level) DO UPDATE SET
+                        total = ai_risk_totals.total + EXCLUDED.total
+                    """,
+                    (risk, n),
+                )
+
+        now = time.time()
+        if now - _DB["last_cleanup"] > 300:
+            _DB["last_cleanup"] = now
+            conn.execute(
+                "DELETE FROM ai_flow_events WHERE ts < now() - %s::interval",
+                (f"{DB_RETENTION['flow_events'] // 3600} hours",),
+            )
+            conn.execute(
+                "DELETE FROM ai_alerts WHERE ts < now() - %s::interval",
+                (f"{DB_RETENTION['alerts'] // 86400} days",),
+            )
+            conn.execute(
+                "DELETE FROM ai_hourly WHERE bucket < now() - %s::interval",
+                (f"{DB_RETENTION['hourly'] // 86400} days",),
+            )
+    except Exception as exc:
+        print(f"[db] write failed (batch of {len(batch)} dropped): {exc}")
+        try:
+            if _DB["conn"] is not None:
+                _DB["conn"].close()
+        except Exception:
+            pass
+        _DB["conn"] = None
+
+
+def _db_writer() -> None:
+    while True:
+        item = _DB["q"].get()
+        batch = [item]
+        while len(batch) < 500:
+            try:
+                batch.append(_DB["q"].get_nowait())
+            except queue.Empty:
+                break
+        _db_flush(batch)
+
+
+def _db_init() -> None:
+    if not DB_URL:
+        print("[db] DATABASE_URL not set - history stays in-memory only")
+        return
+    try:
+        conn = _db_get_conn()
+        conn.execute(_DB_SCHEMA)
+        _DB["enabled"] = True
+        _DB["q"] = queue.Queue(maxsize=20000)
+        threading.Thread(target=_db_writer, daemon=True).start()
+        print("[db] connected - verdict history is now persistent")
+    except Exception as exc:
+        print(f"[db] init failed - history stays in-memory only: {exc}")
+        _DB["enabled"] = False
+
+
+def _enqueue_flow(device_id: str, is_attack: bool) -> None:
+    if _DB["q"] is None:
+        return
+    try:
+        _DB["q"].put_nowait({
+            "type": "flow", "device_id": device_id,
+            "is_attack": is_attack, "hour": int(time.time() // 3600),
+        })
+    except queue.Full:
+        pass
+
+
+def _enqueue_alert(alert: Dict[str, Any]) -> None:
+    if _DB["q"] is None:
+        return
+    try:
+        _DB["q"].put_nowait({"type": "attack", **alert})
+    except queue.Full:
+        pass
+
+
+def _build_stats_db() -> Dict[str, Any]:
+    conn = _db_get_conn()
+    flows_total = conn.execute(
+        "SELECT flows_total FROM ai_counters WHERE id = 1"
+    ).fetchone()[0]
+    by_class_rows = conn.execute(
+        "SELECT attack_class, total FROM ai_class_totals ORDER BY total DESC"
+    ).fetchall()
+    risk_rows = conn.execute(
+        "SELECT risk_level, total FROM ai_risk_totals"
+    ).fetchall()
+    lh = conn.execute(
+        """
+        SELECT count(*), count(*) FILTER (WHERE is_attack),
+               count(DISTINCT device_id)
+        FROM ai_flow_events WHERE ts > now() - interval '1 hour'
+        """
+    ).fetchone()
+    alert_rows = conn.execute(
+        """
+        SELECT extract(epoch from ts), device_id, attack_class, confidence,
+               risk_level, model_status, defense_actions
+        FROM ai_alerts ORDER BY id DESC LIMIT 12
+        """
+    ).fetchall()
+    return {
+        "ts": time.time(),
+        "flows_total": int(flows_total),
+        "attacks_total": int(sum(t for _, t in by_class_rows)),
+        "flows_last_hour": int(lh[0]),
+        "attacks_last_hour": int(lh[1]),
+        "active_devices": int(lh[2]),
+        "attacks_by_class": {c: int(t) for c, t in by_class_rows},
+        "risk_levels": {r: int(t) for r, t in risk_rows},
+        "recent_alerts": [
+            {
+                "ts": float(r[0]), "device_id": r[1], "attack_class": r[2],
+                "confidence": float(r[3]), "risk_level": r[4],
+                "model_status": r[5], "defense_actions": list(r[6]),
+            }
+            for r in alert_rows
+        ],
+    }
+
+
+def _stats_payload() -> Dict[str, Any]:
+    if _DB["enabled"]:
+        try:
+            return _build_stats_db()
+        except Exception as exc:
+            print(f"[db] stats read failed, using in-memory: {exc}")
+    return _build_stats()
 
 
 def _load():
@@ -223,7 +505,24 @@ def _load():
 @asynccontextmanager
 async def _lifespan(_app):
     _load()
+    _load_gnn()
+    _db_init()
     yield
+
+
+def _load_gnn():
+    """Load the live GNN (gat.onnx + scaler) if both artifacts exist."""
+    if not (os.path.exists(GNN_ONNX) and os.path.exists(GNN_SCALER_JSON)):
+        print("[gnn] artifacts missing (gat.onnx / gnn_scaler.json) - gnn_risk stays 0.0")
+        return
+    try:
+        from gnn_live import GNNLive
+
+        _state["gnn"] = GNNLive()
+        print("[gnn] loaded - causal per-IP risk is live")
+    except Exception as exc:
+        print(f"[gnn] load failed - gnn_risk stays 0.0: {exc}")
+        _state["gnn"] = None
 
 
 app = FastAPI(title="PredictShield AI Engine", version="0.2.0", lifespan=_lifespan)
@@ -296,7 +595,7 @@ def _xgb_proba(last_flow: np.ndarray) -> np.ndarray:
     return np.asarray(proba, dtype=np.float32)
 
 
-def _fusion_verdict(seq: np.ndarray) -> PredictResponse:
+def _fusion_verdict(seq: np.ndarray, gnn_risk: float = 0.0) -> PredictResponse:
     stack = _state["fusion"]
     if seq.ndim == 2:  # (50, 77) buffer -> single-sample batch (1, 50, 77)
         seq = seq[None, ...]
@@ -310,7 +609,7 @@ def _fusion_verdict(seq: np.ndarray) -> PredictResponse:
     if_score = 0.0
     if _state["iso"] is not None:
         if_score = float(-_state["iso"].decision_function(last.astype(np.float64))[0])
-    gnn_risk = 0.0  # live GNN risk feature: future work (unseen-IP default)
+    # gnn_risk: causal per-IP risk from gnn_live (0.0 = unseen IP default)
 
     feats = np.concatenate(
         [xgb_proba, lstm_proba, trans_proba, [if_score, gnn_risk]]
@@ -331,20 +630,72 @@ def health():
         "fusion": _state["fusion"] is not None,
         "xgboost": _state["xgb"] is not None,
         "isolation_forest": _state["iso"] is not None,
+        "gnn": _state["gnn"] is not None,
+        "db_history": _DB["enabled"],
     }
 
 
 @app.get("/ai/stats")
 def stats():
-    """Aggregate live stats for the /admin/report dashboard."""
-    return _build_stats()
+    """Aggregate live stats for the /admin/report dashboard (DB-backed)."""
+    return _stats_payload()
 
 
 @app.get("/ai/alerts")
 def alerts(limit: int = 50):
     """Recent attack alerts, newest first."""
     limit = max(1, min(limit, 500))
+    if _DB["enabled"]:
+        try:
+            conn = _db_get_conn()
+            rows = conn.execute(
+                """
+                SELECT extract(epoch from ts), device_id, attack_class, confidence,
+                       risk_level, model_status, defense_actions
+                FROM ai_alerts ORDER BY id DESC LIMIT %s
+                """,
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "ts": float(r[0]), "device_id": r[1], "attack_class": r[2],
+                    "confidence": float(r[3]), "risk_level": r[4],
+                    "model_status": r[5], "defense_actions": list(r[6]),
+                }
+                for r in rows
+            ]
+        except Exception as exc:
+            print(f"[db] alerts read failed, using in-memory: {exc}")
     return list(_MONITOR["alerts"])[-limit:][::-1]
+
+
+@app.get("/ai/history")
+def history(hours: int = 24):
+    """Per-hour flows/attacks rollup from the database (persistent history)."""
+    hours = max(1, min(hours, 720))
+    if not _DB["enabled"]:
+        return {"enabled": False, "hours": []}
+    try:
+        conn = _db_get_conn()
+        rows = conn.execute(
+            """
+            SELECT extract(epoch from bucket), flows, attacks
+            FROM ai_hourly
+            WHERE bucket > now() - (%s || ' hours')::interval
+            ORDER BY bucket
+            """,
+            (str(hours),),
+        ).fetchall()
+        return {
+            "enabled": True,
+            "hours": [
+                {"ts": float(r[0]), "flows": int(r[1]), "attacks": int(r[2])}
+                for r in rows
+            ],
+        }
+    except Exception as exc:
+        print(f"[db] history read failed: {exc}")
+        return {"enabled": False, "hours": []}
 
 
 @app.get("/ai/stream")
@@ -354,7 +705,7 @@ async def stream(interval: float = 2.0):
 
     async def event_gen():
         while True:
-            yield f"data: {json.dumps(_build_stats())}\n\n"
+            yield f"data: {json.dumps(_stats_payload())}\n\n"
             await asyncio.sleep(interval)
 
     return StreamingResponse(
@@ -385,7 +736,14 @@ def predict(req: PredictRequest):
     buf.append(x[0])
 
     if _state["fusion"] is not None and len(buf) >= SEQ_LEN:
-        resp = _fusion_verdict(np.stack(buf))
+        gnn_risk = 0.0
+        gnn = _state["gnn"]
+        if gnn is not None and req.topology:
+            try:
+                gnn_risk = gnn.on_flow(req.topology)
+            except Exception as exc:
+                print(f"[gnn] risk failed: {exc}")
+        resp = _fusion_verdict(np.stack(buf), gnn_risk)
     elif _state["xgb"] is None:
         resp = PredictResponse(
             attack_class="unknown", confidence=0.0, risk_level="LOW",

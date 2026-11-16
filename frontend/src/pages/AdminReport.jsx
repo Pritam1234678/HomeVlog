@@ -64,6 +64,7 @@ function AlertRow({ alert }) {
 
 export default function AdminReport() {
   const [stats, setStats] = useState(null)
+  const [history, setHistory] = useState(null)
   const [connected, setConnected] = useState(false)
   const [lastUpdate, setLastUpdate] = useState(null)
   const [, setTick] = useState(0)
@@ -75,11 +76,20 @@ export default function AdminReport() {
       setStats(data)
       setLastUpdate(Date.now())
     }
+    const fetchHistory = () =>
+      fetch(`${API_URL}/ai/history?hours=24`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then(setHistory)
+        .catch(() => {})
     const fetchOnce = () =>
       fetch(`${API_URL}/ai/stats`)
         .then((r) => (r.ok ? r.json() : null))
         .then(apply)
         .catch(() => {})
+
+    fetchOnce()
+    fetchHistory()
+    const historyTimer = setInterval(fetchHistory, 30000)
 
     const startPolling = () => {
       if (pollRef.current) return
@@ -118,6 +128,7 @@ export default function AdminReport() {
       es?.close()
       stopPolling()
       clearInterval(clock)
+      clearInterval(historyTimer)
     }
   }, [])
 
@@ -125,6 +136,17 @@ export default function AdminReport() {
   const maxClass = Math.max(1, ...Object.values(attacks))
   const risks = stats?.risk_levels || {}
   const alerts = stats?.recent_alerts || []
+
+  const historyEnabled = history?.enabled
+  const historyRows = history?.hours || []
+  const nowHour = Math.floor(Date.now() / 3600000)
+  const dayBars = []
+  for (let h = 23; h >= 0; h--) {
+    const bucketTs = (nowHour - h) * 3600
+    const row = historyRows.find((r) => Math.floor(r.ts / 3600) === nowHour - h)
+    dayBars.push({ ts: bucketTs, flows: row?.flows || 0, attacks: row?.attacks || 0 })
+  }
+  const maxHourFlows = Math.max(1, ...dayBars.map((b) => b.flows))
 
   return (
     <div className="min-h-[calc(100vh-73px)] bg-ink text-paper">
@@ -215,8 +237,8 @@ export default function AdminReport() {
                   ))}
                 </div>
                 <p className="mt-6 text-xs leading-relaxed text-paper/40">
-                  {stats.flows_last_hour ?? 0} flows analyzed in the last hour · counters reset
-                  when the AI engine restarts.
+                  {stats.flows_last_hour ?? 0} flows analyzed in the last hour · history
+                  persisted in PostgreSQL.
                 </p>
               </section>
 
@@ -250,6 +272,47 @@ export default function AdminReport() {
                 )}
               </section>
             </div>
+
+            {/* 24h history (persisted in PostgreSQL) */}
+            {historyEnabled && (
+              <section className="mt-6 rounded-3xl border border-white/10 bg-white/[0.03] p-6">
+                <div className="flex items-center justify-between">
+                  <h2 className="font-serif text-xl font-medium">Last 24 hours</h2>
+                  <span className="text-xs text-paper/40">persisted in PostgreSQL</span>
+                </div>
+                <div className="mt-5 flex h-28 items-end gap-1">
+                  {dayBars.map((b) => (
+                    <div
+                      key={b.ts}
+                      title={`${new Date(b.ts * 1000).toLocaleTimeString('en-IN', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })} — ${b.flows} flows, ${b.attacks} attacks`}
+                      className="relative flex-1 rounded-t bg-white/10"
+                      style={{ height: `${Math.max(4, (b.flows / maxHourFlows) * 100)}%` }}
+                    >
+                      {b.attacks > 0 && (
+                        <div
+                          className="absolute bottom-0 w-full rounded-t bg-clay"
+                          style={{
+                            height: `${Math.min(100, (b.attacks / Math.max(1, b.flows)) * 100)}%`,
+                          }}
+                        />
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-2 flex justify-between text-[10px] text-paper/40">
+                  <span>24h ago</span>
+                  <span className="flex items-center gap-2">
+                    <span className="inline-block h-2 w-2 rounded-sm bg-clay" /> attacks
+                    <span className="ml-2 inline-block h-2 w-2 rounded-sm bg-white/20" /> benign
+                    flows
+                  </span>
+                  <span>now</span>
+                </div>
+              </section>
+            )}
           </>
         )}
       </div>
