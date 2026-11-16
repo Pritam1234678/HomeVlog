@@ -25,6 +25,12 @@ function flagOf(cc) {
   return String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65))
 }
 
+function fmtRemaining(s) {
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  return h > 0 ? `${h}h ${m}m` : `${m}m`
+}
+
 function AlertRow({ alert, refNow }) {
   const riskStyle = RISK_STYLES[alert.risk_level] || RISK_STYLES.LOW
   return (
@@ -64,7 +70,7 @@ function AlertRow({ alert, refNow }) {
   )
 }
 
-function TopIpsSection({ topIps, geoMap }) {
+function TopIpsSection({ topIps, geoMap, blockedSet, onBlock }) {
   if (!topIps || topIps.length === 0) {
     return null
   }
@@ -88,6 +94,7 @@ function TopIpsSection({ topIps, geoMap }) {
       <ul className="mt-5 space-y-3">
         {topIps.map((t) => {
           const g = geoMap[t.ip] || {}
+          const blocked = blockedSet.has(t.ip)
           const flagged = t.attacks > 0
           return (
             <li key={t.ip} className="rounded-2xl border border-ink/10 bg-paper p-4 transition hover:border-forest/30">
@@ -97,7 +104,11 @@ function TopIpsSection({ topIps, geoMap }) {
                 <span className="text-xs text-smoke">
                   {g.city ? `${g.city}, ` : ''}{g.country || ''}
                 </span>
-                {flagged ? (
+                {blocked ? (
+                  <span className="rounded-full border border-ink/20 bg-ink/10 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-smoke">
+                    Blocked
+                  </span>
+                ) : flagged ? (
                   <span className="rounded-full border border-clay/30 bg-clay/10 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-clay">
                     Flagged
                   </span>
@@ -109,6 +120,15 @@ function TopIpsSection({ topIps, geoMap }) {
                 <span className="ml-auto rounded-full bg-cream px-2 py-0.5 text-[10px] text-smoke">
                   {t.flows} flows · {t.attacks} attacks
                 </span>
+                {!blocked && (
+                  <button
+                    onClick={() => onBlock(t.ip)}
+                    className="rounded-full border border-clay/40 bg-clay/5 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-clay transition hover:bg-clay hover:text-paper"
+                    title={`Block ${t.ip} for 24 hours`}
+                  >
+                    Block 24h
+                  </button>
+                )}
               </div>
               <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-ink/10">
                 <div
@@ -141,6 +161,47 @@ function TopIpsSection({ topIps, geoMap }) {
   )
 }
 
+function BlockedSection({ blocked, onUnblock }) {
+  if (!blocked || blocked.length === 0) {
+    return null
+  }
+  return (
+    <section className="rounded-3xl border border-clay/30 bg-clay/5 p-6">
+      <div className="flex items-center justify-between">
+        <h2 className="font-serif text-xl font-medium text-ink">
+          Blocked IPs <span className="text-sm text-smoke">({blocked.length})</span>
+        </h2>
+        <span className="text-xs text-smoke">rejected at the engine gate · auto-unblocks on expiry</span>
+      </div>
+      <ul className="mt-4 space-y-2">
+        {blocked.map((b) => (
+          <li
+            key={b.ip}
+            className="flex flex-wrap items-center gap-3 rounded-xl border border-ink/10 bg-paper px-4 py-3"
+          >
+            <span className="font-mono text-sm font-semibold text-ink">{b.ip}</span>
+            {b.reason && <span className="text-xs text-smoke">{b.reason}</span>}
+            {b.drops > 0 && (
+              <span className="rounded-full bg-clay/10 px-2 py-0.5 text-[10px] font-semibold text-clay">
+                {b.drops} flows dropped
+              </span>
+            )}
+            <span className="ml-auto rounded-full bg-cream px-2.5 py-0.5 text-[10px] text-smoke">
+              unblocks in {fmtRemaining(b.remaining_s)}
+            </span>
+            <button
+              onClick={() => onUnblock(b.ip)}
+              className="rounded-full border border-forest/30 bg-forest/5 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-forest transition hover:bg-forest hover:text-paper"
+            >
+              Unblock
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
 export default function AdminReport() {
   const [adminToken, setAdminToken] = useState(() => sessionStorage.getItem('ps_admin_token') || '')
   const [loginForm, setLoginForm] = useState({ username: '', password: '' })
@@ -149,6 +210,7 @@ export default function AdminReport() {
   const [history, setHistory] = useState(null)
   const [session, setSession] = useState(null)
   const [geoMap, setGeoMap] = useState({})
+  const [blockedIps, setBlockedIps] = useState([])
   const [connected, setConnected] = useState(false)
   const [lastUpdate, setLastUpdate] = useState(null)
   const [, setTick] = useState(0)
@@ -211,6 +273,35 @@ export default function AdminReport() {
       .then((r) => (r.ok ? r.json() : null))
       .then(setSession)
       .catch(() => {})
+
+  const fetchBlocked = () =>
+    adminFetch(`${API_URL}/ai/ip/blocked`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setBlockedIps(d?.blocked || []))
+      .catch(() => {})
+
+  const blockIp = async (ip) => {
+    if (!window.confirm(`Block ${ip} for 24 hours? Its traffic will be rejected at the engine.`)) return
+    try {
+      await adminFetch(`${API_URL}/ai/ip/block`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip, hours: 24, reason: 'blocked from threat monitor' }),
+      })
+      fetchBlocked()
+    } catch {}
+  }
+
+  const unblockIp = async (ip) => {
+    try {
+      await adminFetch(`${API_URL}/ai/ip/unblock`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip }),
+      })
+      fetchBlocked()
+    } catch {}
+  }
 
   const startSession = async () => {
     try {
@@ -276,7 +367,9 @@ export default function AdminReport() {
     fetchOnce()
     fetchHistory()
     fetchSession()
+    fetchBlocked()
     const historyTimer = setInterval(fetchHistory, 30000)
+    const blockedTimer = setInterval(fetchBlocked, 30000)
 
     const startPolling = () => {
       if (pollRef.current) return
@@ -316,6 +409,7 @@ export default function AdminReport() {
       stopPolling()
       clearInterval(clock)
       clearInterval(historyTimer)
+      clearInterval(blockedTimer)
     }
   }, [adminToken])
 
@@ -638,7 +732,15 @@ export default function AdminReport() {
               </div>
 
               {/* Top source IPs */}
-              <TopIpsSection topIps={stats?.top_ips} geoMap={geoMap} />
+              <TopIpsSection
+                topIps={stats?.top_ips}
+                geoMap={geoMap}
+                blockedSet={new Set(blockedIps.map((b) => b.ip))}
+                onBlock={blockIp}
+              />
+
+              {/* Blocked IPs */}
+              <BlockedSection blocked={blockedIps} onUnblock={unblockIp} />
 
               {/* 24h history */}
               {historyEnabled && (

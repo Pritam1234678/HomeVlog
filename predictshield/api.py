@@ -137,6 +137,11 @@ _IPS: Dict[str, Dict[str, Any]] = {}
 # IP geolocation cache (ip-api.com free tier, resolved lazily on demand)
 _GEO_CACHE: Dict[str, Dict[str, Any]] = {}
 
+# Blocked source IPs: ip -> until (engine-clock epoch). Persisted in
+# ai_blocked_ips; blocked flows are rejected with 403 at /ai/predict.
+_BLOCKED: Dict[str, float] = {}
+_BLOCK_META: Dict[str, Dict[str, Any]] = {}
+
 
 def _record(device_id: str, resp: "PredictResponse", src_ip: str = None) -> None:
     """Record a real verdict (warmup_xgboost / fusion_5model) into the monitor."""
@@ -297,6 +302,12 @@ CREATE TABLE IF NOT EXISTS ai_hourly (
     flows BIGINT NOT NULL DEFAULT 0,
     attacks BIGINT NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS ai_blocked_ips (
+    ip VARCHAR(64) PRIMARY KEY,
+    blocked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    until TIMESTAMPTZ NOT NULL,
+    reason VARCHAR(200)
+);
 -- migrations for source-IP visibility
 ALTER TABLE ai_alerts ADD COLUMN IF NOT EXISTS src_ip VARCHAR(64);
 ALTER TABLE ai_flow_events ADD COLUMN IF NOT EXISTS src_ip VARCHAR(64);
@@ -414,6 +425,7 @@ def _db_flush(batch: List[Dict[str, Any]], tries: int = 0) -> None:
                     "DELETE FROM ai_hourly WHERE bucket < now() - %s::interval",
                     (f"{DB_RETENTION['hourly'] // 86400} days",),
                 )
+                conn.execute("DELETE FROM ai_blocked_ips WHERE until < now()")
     except Exception as exc:
         try:
             if _DB["conn"] is not None:
@@ -711,7 +723,27 @@ async def _lifespan(_app):
     _load()
     _load_gnn()
     _db_init()
+    _load_blocked()
     yield
+
+
+def _load_blocked():
+    """Restore active IP blocks from the database after a restart."""
+    if not _DB["enabled"]:
+        return
+    try:
+        conn = _db_get_conn()
+        rows = conn.execute(
+            """SELECT ip, extract(epoch from until), reason
+               FROM ai_blocked_ips WHERE until > now()"""
+        ).fetchall()
+        for ip, until, reason in rows:
+            _BLOCKED[ip] = float(until)
+            _BLOCK_META[ip] = {"reason": reason or "", "drops": 0}
+        if _BLOCKED:
+            print(f"[block] {len(_BLOCKED)} active IP block(s) restored")
+    except Exception as exc:
+        print(f"[block] load failed: {exc}")
 
 
 def _load_gnn():
@@ -897,6 +929,12 @@ class GeoRequest(BaseModel):
     ips: List[str] = Field(default_factory=list)
 
 
+class BlockRequest(BaseModel):
+    ip: str
+    hours: float = 24.0
+    reason: str = ""
+
+
 def _is_private_ip(ip: str) -> bool:
     try:
         a = ipaddress.ip_address(ip)
@@ -904,6 +942,69 @@ def _is_private_ip(ip: str) -> bool:
                 or a.is_reserved or a.is_multicast)
     except ValueError:
         return True
+
+
+@app.post("/ai/ip/block")
+def ip_block(body: BlockRequest, _: None = Depends(_require_admin)):
+    """Block a source IP for N hours (default 24). Blocked flows get 403."""
+    ip = body.ip.strip()
+    hours = max(0.1, min(body.hours, 720))
+    until = time.time() + hours * 3600
+    _BLOCKED[ip] = until
+    _BLOCK_META[ip] = {"reason": body.reason,
+                       "drops": _BLOCK_META.get(ip, {}).get("drops", 0)}
+    if _DB["enabled"]:
+        try:
+            _db_get_conn().execute(
+                """
+                INSERT INTO ai_blocked_ips (ip, until, reason)
+                VALUES (%s, to_timestamp(%s), %s)
+                ON CONFLICT (ip) DO UPDATE SET
+                    until = EXCLUDED.until, reason = EXCLUDED.reason
+                """,
+                (ip, until, body.reason),
+            )
+        except Exception as exc:
+            print(f"[block] db save failed: {exc}")
+    print(f"[block] {ip} blocked for {hours}h")
+    return {"ip": ip, "blocked": True, "until": until, "hours": hours}
+
+
+@app.post("/ai/ip/unblock")
+def ip_unblock(body: BlockRequest, _: None = Depends(_require_admin)):
+    """Lift a block early - the source can talk to the network again."""
+    ip = body.ip.strip()
+    _BLOCKED.pop(ip, None)
+    _BLOCK_META.pop(ip, None)
+    if _DB["enabled"]:
+        try:
+            _db_get_conn().execute("DELETE FROM ai_blocked_ips WHERE ip = %s", (ip,))
+        except Exception as exc:
+            print(f"[block] db delete failed: {exc}")
+    print(f"[block] {ip} unblocked")
+    return {"ip": ip, "blocked": False}
+
+
+@app.get("/ai/ip/blocked")
+def ip_blocked_list(_: None = Depends(_require_admin)):
+    """Currently blocked source IPs with remaining time and drop counts."""
+    now = time.time()
+    out = []
+    for ip, until in list(_BLOCKED.items()):
+        if until <= now:  # expired lazily
+            _BLOCKED.pop(ip, None)
+            _BLOCK_META.pop(ip, None)
+            if _DB["enabled"]:
+                try:
+                    _db_get_conn().execute("DELETE FROM ai_blocked_ips WHERE ip = %s", (ip,))
+                except Exception:
+                    pass
+            continue
+        meta = _BLOCK_META.get(ip, {})
+        out.append({"ip": ip, "until": until, "remaining_s": int(until - now),
+                    "reason": meta.get("reason", ""), "drops": meta.get("drops", 0)})
+    out.sort(key=lambda b: -b["remaining_s"])
+    return {"blocked": out}
 
 
 @app.post("/ai/geo")
@@ -1043,6 +1144,16 @@ def session_status(_: None = Depends(_require_admin)):
 @app.post("/ai/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
     src_ip = (req.topology or {}).get("src_ip")
+
+    # blocked source IPs are rejected at the gate - no inference, no stats
+    if src_ip and _BLOCKED.get(src_ip, 0) > time.time():
+        meta = _BLOCK_META.setdefault(src_ip, {"reason": "", "drops": 0})
+        meta["drops"] = meta.get("drops", 0) + 1
+        raise HTTPException(
+            status_code=403,
+            detail=f"Source IP {src_ip} is blocked",
+        )
+
     x = np.asarray(req.features, dtype=np.float32).reshape(1, -1)
     if _state["flow_scaler"] is not None:
         x = _state["flow_scaler"].transform(x).astype(np.float32)
