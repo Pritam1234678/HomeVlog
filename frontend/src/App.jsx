@@ -57,14 +57,9 @@ export default function App() {
             </ProtectedRoute>
           }
         />
-        <Route
-          path="/admin/report"
-          element={
-            <ProtectedRoute>
-              <AdminReport />
-            </ProtectedRoute>
-          }
-        />
+        {/* Admin gate is separate: the page itself requires the admin login,
+            independent of the HomeVlog session/JWT */}
+        <Route path="/admin/report" element={<AdminReport />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </>
