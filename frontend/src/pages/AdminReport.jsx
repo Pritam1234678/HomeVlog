@@ -379,7 +379,7 @@ export default function AdminReport() {
                 value={(stats.attacks_total ?? 0).toLocaleString()}
                 accent="text-clay"
               />
-              <StatCard label="Active devices" value={stats.active_devices ?? 0} />
+              <StatCard label="Capture nodes" value={stats.active_devices ?? 0} />
               <StatCard
                 label="Attacks (1h)"
                 value={(stats.attacks_last_hour ?? 0).toLocaleString()}
