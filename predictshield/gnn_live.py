@@ -47,6 +47,9 @@ class GNNLive:
         src_ip = topo.get("src_ip")
         if not ts or not src_ip:
             return 0.0
+        # client clocks can be skewed into the future - clamp so windows
+        # always close as engine time advances
+        ts = min(ts, time.time())
         win = int(ts // WINDOW_SECONDS) * WINDOW_SECONDS
         with self.lock:
             flows = self.windows.setdefault(win, [])
