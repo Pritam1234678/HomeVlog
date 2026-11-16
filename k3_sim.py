@@ -57,11 +57,12 @@ def build_pool(per_class=40):
     return pool
 
 
-def topology_for(label, i, ts, attacker_ip):
-    """Attack-consistent per-flow topology so the GNN sees what the models saw."""
+def topology_for(label, i, ts, attacker_ip=None):
+    """Per-flow topology. attacker_ip unused - the engine resolves the real
+    client IP from the connection, so the dashboard shows the true source."""
     src_port = random.randint(40000, 60000)
     if label in ("DDoS", "DoS Hulk", "DoS GoldenEye"):
-        return {"src_ip": attacker_ip, "dst_ip": "10.0.0.28", "src_port": src_port,
+        return {"dst_ip": "10.0.0.28", "src_port": src_port,
                 "dst_port": 80, "protocol": 6, "ts": ts,
                 "duration_us": random.uniform(100_000, 900_000),
                 "fwd_pkts": random.randint(80, 300), "bwd_pkts": random.randint(5, 20),
@@ -71,7 +72,7 @@ def topology_for(label, i, ts, attacker_ip):
                 "syn": random.randint(20, 60), "rst": random.randint(0, 2),
                 "fin": random.randint(1, 3), "ack": random.randint(60, 200)}
     if label == "SSH-Patator":
-        return {"src_ip": attacker_ip, "dst_ip": "10.0.0.28", "src_port": src_port,
+        return {"dst_ip": "10.0.0.28", "src_port": src_port,
                 "dst_port": 22, "protocol": 6, "ts": ts,
                 "duration_us": random.uniform(100_000, 300_000),
                 "fwd_pkts": random.randint(20, 60), "bwd_pkts": random.randint(5, 15),
@@ -81,7 +82,7 @@ def topology_for(label, i, ts, attacker_ip):
                 "syn": random.randint(5, 15), "rst": random.randint(5, 20),
                 "fin": random.randint(0, 2), "ack": random.randint(15, 50)}
     if label == "PortScan":
-        return {"src_ip": attacker_ip, "dst_ip": "10.0.0.28", "src_port": src_port,
+        return {"dst_ip": "10.0.0.28", "src_port": src_port,
                 "dst_port": random.choice([21, 22, 23, 25, 80, 110, 135, 139, 443, 445, 3389]),
                 "protocol": 6, "ts": ts, "duration_us": random.uniform(1_000, 20_000),
                 "fwd_pkts": random.randint(2, 4), "bwd_pkts": random.randint(0, 2),
@@ -90,7 +91,7 @@ def topology_for(label, i, ts, attacker_ip):
                 "syn": random.randint(2, 4), "rst": random.randint(1, 3),
                 "fin": 0, "ack": random.randint(0, 2)}
     # Bot / generic
-    return {"src_ip": attacker_ip, "dst_ip": "10.0.0.28", "src_port": src_port,
+    return {"dst_ip": "10.0.0.28", "src_port": src_port,
             "dst_port": random.choice([80, 443, 8080]), "protocol": 6, "ts": ts,
             "duration_us": random.uniform(50_000, 500_000),
             "fwd_pkts": random.randint(10, 40), "bwd_pkts": random.randint(5, 25),
@@ -126,7 +127,10 @@ def main():
                 body = {
                     "features": row["feats"],
                     "device_id": "k3-attack-sim",
-                    "topology": topology_for(row["label"], sent, ts, args.ip),
+                    # no src_ip here - the engine reads the REAL client IP
+                    # from the connection (X-Real-IP), so the dashboard shows
+                    # where the attack is actually coming from
+                    "topology": topology_for(row["label"], sent, ts, None),
                 }
                 try:
                     req = urllib.request.Request(

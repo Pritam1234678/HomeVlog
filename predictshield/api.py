@@ -1142,8 +1142,16 @@ def session_status(_: None = Depends(_require_admin)):
 
 
 @app.post("/ai/predict", response_model=PredictResponse)
-def predict(req: PredictRequest):
-    src_ip = (req.topology or {}).get("src_ip")
+def predict(req: PredictRequest, request: Request):
+    # resolve the REAL source IP: nginx X-Real-IP -> X-Forwarded-For ->
+    # worker-provided topology IP -> direct client. Never trust a spoofed
+    # topology IP when the request itself reveals the true source.
+    src_ip = (
+        request.headers.get("x-real-ip")
+        or (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        or (req.topology or {}).get("src_ip")
+        or (request.client.host if request.client else None)
+    )
 
     # blocked source IPs are rejected at the gate - no inference, no stats
     if src_ip and _BLOCKED.get(src_ip, 0) > time.time():
