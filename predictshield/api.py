@@ -138,21 +138,39 @@ _IPS: Dict[str, Dict[str, Any]] = {}
 # IP geolocation cache (ip-api.com free tier, resolved lazily on demand)
 _GEO_CACHE: Dict[str, Dict[str, Any]] = {}
 
-# Blocked source IPs: ip -> until (engine-clock epoch). Persisted in
-# ai_blocked_ips; blocked flows are rejected with 403 at /ai/predict AND
-# dropped at the network firewall (web ports 80/443, SSH untouched).
+# Blocked source IPs: in-memory cache mirrored from the DB (the single
+# source of truth). Persisted in ai_blocked_ips; blocked flows are rejected
+# with 403 at /ai/predict AND dropped at the network firewall (web ports
+# 80/443, SSH untouched).
 _BLOCKED: Dict[str, float] = {}
 _BLOCK_META: Dict[str, Dict[str, Any]] = {}
 FIREWALL_HELPER = "/usr/local/bin/ps-firewall"
 
 
-def _firewall_sync():
-    """Make the iptables ruleset match the active blocklist (empty list
-    clears every ps-block rule). Best-effort: if the firewall call fails,
-    the engine-level 403 gate still applies."""
+def _sync_blocked():
+    """Make reality match the DB blocklist everywhere: reload the in-memory
+    cache from ai_blocked_ips (so direct DB edits reconcile too) and sync the
+    iptables ruleset to the active public IPs. Best-effort firewall."""
+    if _DB["enabled"]:
+        try:
+            conn = _db_get_conn()
+            rows = conn.execute(
+                """SELECT ip, extract(epoch from until), reason
+                   FROM ai_blocked_ips WHERE until > now()"""
+            ).fetchall()
+            fresh = {ip: float(until) for ip, until, _ in rows}
+            old_drops = {ip: m.get("drops", 0) for ip, m in _BLOCK_META.items()}
+            _BLOCKED.clear()
+            _BLOCKED.update(fresh)
+            _BLOCK_META.clear()
+            for ip, until, reason in rows:
+                _BLOCK_META[ip] = {"reason": reason or "",
+                                   "drops": old_drops.get(ip, 0)}
+        except Exception as exc:
+            print(f"[block] db read failed, using in-memory: {exc}")
+    active = [ip for ip, until in _BLOCKED.items()
+              if until > time.time() and not _is_private_ip(ip)]
     try:
-        active = [ip for ip, until in _BLOCKED.items()
-                  if until > time.time() and not _is_private_ip(ip)]
         subprocess.run(["sudo", "-n", FIREWALL_HELPER, "sync", *active],
                        check=False, capture_output=True, timeout=15)
     except Exception as exc:
@@ -442,7 +460,7 @@ def _db_flush(batch: List[Dict[str, Any]], tries: int = 0) -> None:
                     (f"{DB_RETENTION['hourly'] // 86400} days",),
                 )
                 conn.execute("DELETE FROM ai_blocked_ips WHERE until < now()")
-                _firewall_sync()  # drop firewall rules for expired blocks
+                _sync_blocked()  # reconcile firewall + memory after expiry deletes
     except Exception as exc:
         try:
             if _DB["conn"] is not None:
@@ -740,28 +758,8 @@ async def _lifespan(_app):
     _load()
     _load_gnn()
     _db_init()
-    _load_blocked()
+    _sync_blocked()
     yield
-
-
-def _load_blocked():
-    """Restore active IP blocks from the database after a restart."""
-    if not _DB["enabled"]:
-        return
-    try:
-        conn = _db_get_conn()
-        rows = conn.execute(
-            """SELECT ip, extract(epoch from until), reason
-               FROM ai_blocked_ips WHERE until > now()"""
-        ).fetchall()
-        for ip, until, reason in rows:
-            _BLOCKED[ip] = float(until)
-            _BLOCK_META[ip] = {"reason": reason or "", "drops": 0}
-        if _BLOCKED:
-            print(f"[block] {len(_BLOCKED)} active IP block(s) restored")
-        _firewall_sync()  # re-apply firewall rules + clear stale ones
-    except Exception as exc:
-        print(f"[block] load failed: {exc}")
 
 
 def _load_gnn():
@@ -984,8 +982,8 @@ def ip_block(body: BlockRequest, _: None = Depends(_require_admin)):
             )
         except Exception as exc:
             print(f"[block] db save failed: {exc}")
-    _firewall_sync()
-    print(f"[block] {ip} blocked for {hours}h (firewall + engine gate)")
+    _sync_blocked()
+    print(f"[block] {ip} blocked for {hours}h (DB + firewall + engine gate)")
     return {"ip": ip, "blocked": True, "until": until, "hours": hours}
 
 
@@ -1000,7 +998,7 @@ def ip_unblock(body: BlockRequest, _: None = Depends(_require_admin)):
             _db_get_conn().execute("DELETE FROM ai_blocked_ips WHERE ip = %s", (ip,))
         except Exception as exc:
             print(f"[block] db delete failed: {exc}")
-    _firewall_sync()
+    _sync_blocked()
     print(f"[block] {ip} unblocked")
     return {"ip": ip, "blocked": False}
 
