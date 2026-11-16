@@ -81,7 +81,7 @@ def emit_flow(flow, extractor, args):
         resp = requests.post(
             f"{args.api_url}/ai/predict",
             json={"features": vector, "device_id": args.device_id, "topology": topology},
-            timeout=5,
+            timeout=10,
         )
         print(f"[{resp.status_code}] flow={flow.key} -> {resp.text}")
     except Exception as exc:
