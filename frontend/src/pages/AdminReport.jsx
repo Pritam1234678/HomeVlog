@@ -171,7 +171,7 @@ function BlockedSection({ blocked, onUnblock }) {
         <h2 className="font-serif text-xl font-medium text-ink">
           Blocked IPs <span className="text-sm text-smoke">({blocked.length})</span>
         </h2>
-        <span className="text-xs text-smoke">rejected at the engine gate · auto-unblocks on expiry</span>
+        <span className="text-xs text-smoke">dropped at the network firewall (ports 80/443) + engine gate · auto-unblocks on expiry</span>
       </div>
       <ul className="mt-4 space-y-2">
         {blocked.map((b) => (
