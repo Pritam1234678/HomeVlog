@@ -178,7 +178,7 @@ def _build_stats(since: float = None) -> dict:
         top_ips = []
         for a in session_alerts:
             ip = a.get("src_ip")
-            if not ip:
+            if not ip or _is_private_ip(ip):
                 continue
             e = next((t for t in top_ips if t["ip"] == ip), None)
             if e:
@@ -193,11 +193,14 @@ def _build_stats(since: float = None) -> dict:
         by_class = dict(sorted(_MONITOR["by_class"].items(), key=lambda kv: -kv[1]))
         by_risk = dict(_MONITOR["by_risk"])
         recent_alerts = list(_MONITOR["alerts"])[-12:][::-1]
-        top_ips = sorted(
-            ({"ip": ip, "flows": v["flows"], "attacks": v["attacks"],
-              "last_ts": v["last_ts"]} for ip, v in _IPS.items()),
-            key=lambda t: (-t["flows"], -t["attacks"]),
-        )[:8]
+        top_ips = []
+        for ip, v in sorted(_IPS.items(), key=lambda kv: (-kv[1]["flows"], -kv[1]["attacks"])):
+            if _is_private_ip(ip):
+                continue
+            top_ips.append({"ip": ip, "flows": v["flows"], "attacks": v["attacks"],
+                            "last_ts": v["last_ts"]})
+            if len(top_ips) >= 8:
+                break
     gnn = _state["gnn"]
     for t in top_ips:
         t["gnn_risk"] = round(gnn.latest_risk(t["ip"]), 3) if gnn else None
@@ -500,19 +503,22 @@ def _build_stats_db(since: float = None) -> Dict[str, Any]:
             """,
             (since,),
         ).fetchall()
-        top_ips = [
-            {"ip": r[0], "flows": int(r[1]), "attacks": int(r[2])}
-            for r in conn.execute(
-                """
-                SELECT src_ip, count(*) AS flows,
-                       count(*) FILTER (WHERE is_attack) AS attacks
-                FROM ai_flow_events
-                WHERE ts >= to_timestamp(%s) AND src_ip IS NOT NULL
-                GROUP BY src_ip ORDER BY attacks DESC, flows DESC LIMIT 8
-                """,
-                (since,),
-            ).fetchall()
-        ]
+        top_ips = []
+        for r in conn.execute(
+            """
+            SELECT src_ip, count(*) AS flows,
+                   count(*) FILTER (WHERE is_attack) AS attacks
+            FROM ai_flow_events
+            WHERE ts >= to_timestamp(%s) AND src_ip IS NOT NULL
+            GROUP BY src_ip ORDER BY attacks DESC, flows DESC LIMIT 24
+            """,
+            (since,),
+        ).fetchall():
+            if _is_private_ip(r[0]):
+                continue
+            top_ips.append({"ip": r[0], "flows": int(r[1]), "attacks": int(r[2])})
+            if len(top_ips) >= 8:
+                break
     else:
         flows_total = conn.execute(
             "SELECT flows_total FROM ai_counters WHERE id = 1"
@@ -537,18 +543,21 @@ def _build_stats_db(since: float = None) -> Dict[str, Any]:
             FROM ai_alerts ORDER BY id DESC LIMIT 12
             """
         ).fetchall()
-        top_ips = [
-            {"ip": r[0], "flows": int(r[1]), "attacks": int(r[2])}
-            for r in conn.execute(
-                """
-                SELECT src_ip, count(*) AS flows,
-                       count(*) FILTER (WHERE is_attack) AS attacks
-                FROM ai_flow_events
-                WHERE src_ip IS NOT NULL
-                GROUP BY src_ip ORDER BY flows DESC LIMIT 8
-                """
-            ).fetchall()
-        ]
+        top_ips = []
+        for r in conn.execute(
+            """
+            SELECT src_ip, count(*) AS flows,
+                   count(*) FILTER (WHERE is_attack) AS attacks
+            FROM ai_flow_events
+            WHERE src_ip IS NOT NULL
+            GROUP BY src_ip ORDER BY flows DESC LIMIT 24
+            """
+        ).fetchall():
+            if _is_private_ip(r[0]):
+                continue
+            top_ips.append({"ip": r[0], "flows": int(r[1]), "attacks": int(r[2])})
+            if len(top_ips) >= 8:
+                break
     gnn = _state["gnn"]
     for t in top_ips:
         t["gnn_risk"] = round(gnn.latest_risk(t["ip"]), 3) if gnn else None
