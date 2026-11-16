@@ -510,7 +510,7 @@ def _build_stats_db(since: float = None) -> Dict[str, Any]:
                    count(*) FILTER (WHERE is_attack) AS attacks
             FROM ai_flow_events
             WHERE ts >= to_timestamp(%s) AND src_ip IS NOT NULL
-            GROUP BY src_ip ORDER BY attacks DESC, flows DESC LIMIT 24
+            GROUP BY src_ip ORDER BY attacks DESC, flows DESC LIMIT 50
             """,
             (since,),
         ).fetchall():
@@ -550,7 +550,7 @@ def _build_stats_db(since: float = None) -> Dict[str, Any]:
                    count(*) FILTER (WHERE is_attack) AS attacks
             FROM ai_flow_events
             WHERE src_ip IS NOT NULL
-            GROUP BY src_ip ORDER BY flows DESC LIMIT 24
+            GROUP BY src_ip ORDER BY flows DESC LIMIT 50
             """
         ).fetchall():
             if _is_private_ip(r[0]):
