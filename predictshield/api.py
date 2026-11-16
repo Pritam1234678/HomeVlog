@@ -10,11 +10,13 @@ Artifacts live in ./models - see models/README.md. Missing artifacts degrade
 gracefully: /ai/predict answers with model_status="not_deployed".
 """
 import asyncio
+import ipaddress
 import json
 import os
 import queue
 import threading
 import time
+import urllib.request
 from collections import Counter, deque
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List
@@ -102,8 +104,15 @@ _session: Dict[str, Any] = {
     "devices": set(),
 }
 
+# Per-source-IP stats (in-memory, session-agnostic; DB keeps the durable copy
+# in ai_flow_events.src_ip). ip -> {flows, attacks, by_class, last_ts}
+_IPS: Dict[str, Dict[str, Any]] = {}
 
-def _record(device_id: str, resp: "PredictResponse") -> None:
+# IP geolocation cache (ip-api.com free tier, resolved lazily on demand)
+_GEO_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _record(device_id: str, resp: "PredictResponse", src_ip: str = None) -> None:
     """Record a real verdict (warmup_xgboost / fusion_5model) into the monitor."""
     if resp.model_status not in ("warmup_xgboost", "fusion_5model"):
         return
@@ -111,7 +120,7 @@ def _record(device_id: str, resp: "PredictResponse") -> None:
     is_attack = resp.attack_class not in ("BENIGN", "unknown")
     _MONITOR["flows_total"] += 1
     _MONITOR["recent_flows"].append((now, is_attack))
-    _enqueue_flow(device_id, is_attack)
+    _enqueue_flow(device_id, is_attack, src_ip)
     devices = _MONITOR["devices"]
     devices[device_id] = now
     if _session["active"]:
@@ -120,15 +129,24 @@ def _record(device_id: str, resp: "PredictResponse") -> None:
         cutoff = now - 7200
         for key in [k for k, t in devices.items() if t < cutoff]:
             devices.pop(key, None)
+    if src_ip:
+        st = _IPS.setdefault(src_ip, {"flows": 0, "attacks": 0, "by_class": {}, "last_ts": 0.0})
+        st["flows"] += 1
+        st["last_ts"] = now
     if is_attack:
         _MONITOR["attacks_total"] += 1
         by_class = _MONITOR["by_class"]
         by_class[resp.attack_class] = by_class.get(resp.attack_class, 0) + 1
         if resp.risk_level in _MONITOR["by_risk"]:
             _MONITOR["by_risk"][resp.risk_level] += 1
+        if src_ip:
+            st = _IPS[src_ip]
+            st["attacks"] += 1
+            st["by_class"][resp.attack_class] = st["by_class"].get(resp.attack_class, 0) + 1
         alert = {
             "ts": now,
             "device_id": device_id,
+            "src_ip": src_ip,
             "attack_class": resp.attack_class,
             "confidence": resp.confidence,
             "risk_level": resp.risk_level,
@@ -157,6 +175,17 @@ def _build_stats(since: float = None) -> dict:
                 by_risk[a["risk_level"]] += 1
         active_devices = len(_session["devices"])
         recent_alerts = session_alerts[-12:][::-1]
+        top_ips = []
+        for a in session_alerts:
+            ip = a.get("src_ip")
+            if not ip:
+                continue
+            e = next((t for t in top_ips if t["ip"] == ip), None)
+            if e:
+                e["attacks"] += 1
+            else:
+                top_ips.append({"ip": ip, "flows": 0, "attacks": 1})
+        top_ips = sorted(top_ips, key=lambda t: -t["attacks"])[:8]
     else:
         attacks_count = sum(1 for _, a in recent if a)
         flows_count = len(recent)
@@ -164,6 +193,14 @@ def _build_stats(since: float = None) -> dict:
         by_class = dict(sorted(_MONITOR["by_class"].items(), key=lambda kv: -kv[1]))
         by_risk = dict(_MONITOR["by_risk"])
         recent_alerts = list(_MONITOR["alerts"])[-12:][::-1]
+        top_ips = sorted(
+            ({"ip": ip, "flows": v["flows"], "attacks": v["attacks"],
+              "last_ts": v["last_ts"]} for ip, v in _IPS.items()),
+            key=lambda t: (-t["flows"], -t["attacks"]),
+        )[:8]
+    gnn = _state["gnn"]
+    for t in top_ips:
+        t["gnn_risk"] = round(gnn.latest_risk(t["ip"]), 3) if gnn else None
     return {
         "ts": now,
         "flows_total": _MONITOR["flows_total"] if since is None else flows_count,
@@ -174,11 +211,12 @@ def _build_stats(since: float = None) -> dict:
         "attacks_by_class": by_class,
         "risk_levels": by_risk,
         "recent_alerts": recent_alerts,
+        "top_ips": top_ips,
     }
 
 
-def _finish(device_id: str, resp: "PredictResponse") -> "PredictResponse":
-    _record(device_id, resp)
+def _finish(device_id: str, resp: "PredictResponse", src_ip: str = None) -> "PredictResponse":
+    _record(device_id, resp, src_ip)
     return resp
 
 
@@ -230,6 +268,9 @@ CREATE TABLE IF NOT EXISTS ai_hourly (
     flows BIGINT NOT NULL DEFAULT 0,
     attacks BIGINT NOT NULL DEFAULT 0
 );
+-- migrations for source-IP visibility
+ALTER TABLE ai_alerts ADD COLUMN IF NOT EXISTS src_ip VARCHAR(64);
+ALTER TABLE ai_flow_events ADD COLUMN IF NOT EXISTS src_ip VARCHAR(64);
 """
 
 _DB: Dict[str, Any] = {
@@ -268,8 +309,8 @@ def _db_flush(batch: List[Dict[str, Any]], tries: int = 0) -> None:
         with conn.transaction():
             if events:
                 cur.executemany(
-                    "INSERT INTO ai_flow_events (device_id, is_attack) VALUES (%s, %s)",
-                    [(b["device_id"], b["is_attack"]) for b in events],
+                    "INSERT INTO ai_flow_events (device_id, is_attack, src_ip) VALUES (%s, %s, %s)",
+                    [(b["device_id"], b["is_attack"], b.get("src_ip")) for b in events],
                 )
                 conn.execute(
                     "UPDATE ai_counters SET flows_total = flows_total + %s WHERE id = 1",
@@ -294,12 +335,12 @@ def _db_flush(batch: List[Dict[str, Any]], tries: int = 0) -> None:
                 cur.executemany(
                     """
                     INSERT INTO ai_alerts
-                        (device_id, attack_class, confidence, risk_level, model_status, defense_actions)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                        (device_id, src_ip, attack_class, confidence, risk_level, model_status, defense_actions)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
                     [
                         (
-                            b["device_id"], b["attack_class"], b["confidence"],
+                            b["device_id"], b.get("src_ip"), b["attack_class"], b["confidence"],
                             b["risk_level"], b["model_status"],
                             Json(b["defense_actions"]),
                         )
@@ -398,13 +439,14 @@ def _db_init() -> None:
         _DB["enabled"] = False
 
 
-def _enqueue_flow(device_id: str, is_attack: bool) -> None:
+def _enqueue_flow(device_id: str, is_attack: bool, src_ip: str = None) -> None:
     if _DB["q"] is None:
         return
     try:
         _DB["q"].put_nowait({
             "type": "flow", "device_id": device_id,
             "is_attack": is_attack, "hour": int(time.time() // 3600),
+            "src_ip": src_ip,
         })
     except queue.Full:
         pass
@@ -451,13 +493,26 @@ def _build_stats_db(since: float = None) -> Dict[str, Any]:
         ).fetchone()
         alert_rows = conn.execute(
             """
-            SELECT extract(epoch from ts), device_id, attack_class, confidence,
+            SELECT extract(epoch from ts), device_id, src_ip, attack_class, confidence,
                    risk_level, model_status, defense_actions
             FROM ai_alerts WHERE ts >= to_timestamp(%s)
             ORDER BY id DESC LIMIT 12
             """,
             (since,),
         ).fetchall()
+        top_ips = [
+            {"ip": r[0], "flows": int(r[1]), "attacks": int(r[2])}
+            for r in conn.execute(
+                """
+                SELECT src_ip, count(*) AS flows,
+                       count(*) FILTER (WHERE is_attack) AS attacks
+                FROM ai_flow_events
+                WHERE ts >= to_timestamp(%s) AND src_ip IS NOT NULL
+                GROUP BY src_ip ORDER BY flows DESC LIMIT 8
+                """,
+                (since,),
+            ).fetchall()
+        ]
     else:
         flows_total = conn.execute(
             "SELECT flows_total FROM ai_counters WHERE id = 1"
@@ -477,11 +532,26 @@ def _build_stats_db(since: float = None) -> Dict[str, Any]:
         ).fetchone()
         alert_rows = conn.execute(
             """
-            SELECT extract(epoch from ts), device_id, attack_class, confidence,
+            SELECT extract(epoch from ts), device_id, src_ip, attack_class, confidence,
                    risk_level, model_status, defense_actions
             FROM ai_alerts ORDER BY id DESC LIMIT 12
             """
         ).fetchall()
+        top_ips = [
+            {"ip": r[0], "flows": int(r[1]), "attacks": int(r[2])}
+            for r in conn.execute(
+                """
+                SELECT src_ip, count(*) AS flows,
+                       count(*) FILTER (WHERE is_attack) AS attacks
+                FROM ai_flow_events
+                WHERE src_ip IS NOT NULL
+                GROUP BY src_ip ORDER BY flows DESC LIMIT 8
+                """
+            ).fetchall()
+        ]
+    gnn = _state["gnn"]
+    for t in top_ips:
+        t["gnn_risk"] = round(gnn.latest_risk(t["ip"]), 3) if gnn else None
     return {
         "ts": time.time(),
         "flows_total": int(flows_total),
@@ -494,12 +564,14 @@ def _build_stats_db(since: float = None) -> Dict[str, Any]:
         "risk_levels": {r: int(t) for r, t in risk_rows},
         "recent_alerts": [
             {
-                "ts": float(r[0]), "device_id": r[1], "attack_class": r[2],
-                "confidence": float(r[3]), "risk_level": r[4],
-                "model_status": r[5], "defense_actions": list(r[6]),
+                "ts": float(r[0]), "device_id": r[1], "src_ip": r[2],
+                "attack_class": r[3], "confidence": float(r[4]),
+                "risk_level": r[5], "model_status": r[6],
+                "defense_actions": list(r[7]),
             }
             for r in alert_rows
         ],
+        "top_ips": top_ips,
     }
 
 
@@ -747,23 +819,82 @@ def alerts(limit: int = 50):
             conn = _db_get_conn()
             rows = conn.execute(
                 """
-                SELECT extract(epoch from ts), device_id, attack_class, confidence,
-                       risk_level, model_status, defense_actions
+                SELECT extract(epoch from ts), device_id, src_ip, attack_class,
+                       confidence, risk_level, model_status, defense_actions
                 FROM ai_alerts ORDER BY id DESC LIMIT %s
                 """,
                 (limit,),
             ).fetchall()
             return [
                 {
-                    "ts": float(r[0]), "device_id": r[1], "attack_class": r[2],
-                    "confidence": float(r[3]), "risk_level": r[4],
-                    "model_status": r[5], "defense_actions": list(r[6]),
+                    "ts": float(r[0]), "device_id": r[1], "src_ip": r[2],
+                    "attack_class": r[3], "confidence": float(r[4]),
+                    "risk_level": r[5], "model_status": r[6],
+                    "defense_actions": list(r[7]),
                 }
                 for r in rows
             ]
         except Exception as exc:
             print(f"[db] alerts read failed, using in-memory: {exc}")
     return list(_MONITOR["alerts"])[-limit:][::-1]
+
+
+class GeoRequest(BaseModel):
+    ips: List[str] = Field(default_factory=list)
+
+
+def _is_private_ip(ip: str) -> bool:
+    try:
+        a = ipaddress.ip_address(ip)
+        return (a.is_private or a.is_loopback or a.is_link_local
+                or a.is_reserved or a.is_multicast)
+    except ValueError:
+        return True
+
+
+@app.post("/ai/geo")
+def geo_lookup(body: GeoRequest):
+    """Resolve IP -> country/city (ip-api.com free tier, cached per IP).
+    Private/reserved IPs resolve to 'Local / Private network'."""
+    out: Dict[str, Any] = {}
+    to_fetch: List[str] = []
+    for ip in body.ips[:12]:
+        if not ip or not isinstance(ip, str):
+            continue
+        if ip in _GEO_CACHE:
+            out[ip] = _GEO_CACHE[ip]
+            continue
+        if _is_private_ip(ip):
+            res = {"ip": ip, "country": "Local / Private network",
+                   "country_code": "", "city": ""}
+            _GEO_CACHE[ip] = res
+            out[ip] = res
+        else:
+            to_fetch.append(ip)
+    if to_fetch:
+        try:
+            req = urllib.request.Request(
+                "http://ip-api.com/batch?fields=status,country,countryCode,city,query",
+                data=json.dumps(to_fetch).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                rows = json.load(resp)
+            for row in rows:
+                ip = row.get("query")
+                res = ({"ip": ip, "country": row.get("country"),
+                        "country_code": row.get("countryCode"),
+                        "city": row.get("city")}
+                       if row.get("status") == "success"
+                       else {"ip": ip, "country": "Unknown",
+                             "country_code": "", "city": ""})
+                _GEO_CACHE[ip] = res
+                out[ip] = res
+        except Exception:
+            for ip in to_fetch:
+                out.setdefault(ip, {"ip": ip, "country": "Unknown",
+                                    "country_code": "", "city": ""})
+    return {"results": out}
 
 
 @app.get("/ai/history")
@@ -857,6 +988,7 @@ def session_status():
 
 @app.post("/ai/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
+    src_ip = (req.topology or {}).get("src_ip")
     x = np.asarray(req.features, dtype=np.float32).reshape(1, -1)
     if _state["flow_scaler"] is not None:
         x = _state["flow_scaler"].transform(x).astype(np.float32)
@@ -865,7 +997,7 @@ def predict(req: PredictRequest):
         return _finish(req.device_id, PredictResponse(
             attack_class="unknown", confidence=0.0, risk_level="LOW",
             path=[], shap={}, defense_actions=[], model_status="not_deployed",
-        ))
+        ), src_ip)
 
     key = req.device_id or "default"
     buf: deque = _state["buffers"].setdefault(key, deque(maxlen=SEQ_LEN))
@@ -887,4 +1019,4 @@ def predict(req: PredictRequest):
         )
     else:
         resp = _respond(_xgb_proba(buf[-1].reshape(1, -1))[0], "warmup_xgboost")
-    return _finish(req.device_id, resp)
+    return _finish(req.device_id, resp, src_ip)

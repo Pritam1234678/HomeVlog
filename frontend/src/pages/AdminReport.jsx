@@ -49,6 +49,9 @@ function AlertRow({ alert, refNow }) {
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-paper/50">
         <span className="rounded bg-white/5 px-1.5 py-0.5">device: {alert.device_id || 'default'}</span>
+        {alert.src_ip && (
+          <span className="rounded bg-white/5 px-1.5 py-0.5 font-mono">src: {alert.src_ip}</span>
+        )}
         <span className="rounded bg-white/5 px-1.5 py-0.5">{alert.model_status}</span>
       </div>
       <div className="mt-2 flex flex-wrap gap-1.5">
@@ -62,14 +65,117 @@ function AlertRow({ alert, refNow }) {
   )
 }
 
+function flagOf(cc) {
+  if (!cc || cc.length !== 2) return '🌐'
+  return String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65))
+}
+
+function TopIpsSection({ topIps, geoMap }) {
+  if (!topIps || topIps.length === 0) {
+    return null
+  }
+  const maxFlows = Math.max(1, ...topIps.map((t) => t.flows))
+  const byCountry = {}
+  for (const t of topIps) {
+    const g = geoMap[t.ip] || {}
+    const key = g.country || 'Resolving…'
+    byCountry[key] = byCountry[key] || { flows: 0, attacks: 0, cc: g.country_code || '' }
+    byCountry[key].flows += t.flows
+    byCountry[key].attacks += t.attacks
+  }
+  const countries = Object.entries(byCountry).sort((a, b) => b[1].flows - a[1].flows)
+
+  return (
+    <section className="mt-6 rounded-3xl border border-white/10 bg-white/[0.03] p-6">
+      <div className="flex items-center justify-between">
+        <h2 className="font-serif text-xl font-medium">Top source IPs</h2>
+        <span className="text-xs text-paper/40">who is talking to this network</span>
+      </div>
+      <ul className="mt-5 space-y-3">
+        {topIps.map((t) => {
+          const g = geoMap[t.ip] || {}
+          return (
+            <li key={t.ip} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-lg">{flagOf(g.country_code)}</span>
+                <span className="font-mono text-sm font-semibold text-paper">{t.ip}</span>
+                <span className="text-xs text-paper/50">
+                  {g.city ? `${g.city}, ` : ''}{g.country || ''}
+                </span>
+                <span className="ml-auto rounded-full bg-white/5 px-2 py-0.5 text-[10px] text-paper/60">
+                  {t.flows} flows · {t.attacks} attacks
+                </span>
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className="h-full rounded-full bg-forest-light"
+                    style={{ width: `${(t.flows / maxFlows) * 100}%` }}
+                  />
+                </div>
+                {t.gnn_risk != null && t.gnn_risk > 0 && (
+                  <span className="rounded-full border border-amber/30 bg-amber/10 px-2 py-0.5 text-[10px] text-amber">
+                    GNN risk {t.gnn_risk}
+                  </span>
+                )}
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+
+      {countries.length > 0 && (
+        <>
+          <h3 className="mt-7 font-serif text-lg font-medium">Location overview</h3>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {countries.map(([country, v]) => (
+              <span
+                key={country}
+                className="rounded-full border border-white/10 bg-white/5 px-3.5 py-1.5 text-xs text-paper/80"
+              >
+                {flagOf(v.cc)} {country} — {v.flows} flows
+                {v.attacks > 0 && <span className="text-clay"> · {v.attacks} attacks</span>}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
 export default function AdminReport() {
   const [stats, setStats] = useState(null)
   const [history, setHistory] = useState(null)
   const [session, setSession] = useState(null)
+  const [geoMap, setGeoMap] = useState({})
   const [connected, setConnected] = useState(false)
   const [lastUpdate, setLastUpdate] = useState(null)
   const [, setTick] = useState(0)
   const pollRef = useRef(null)
+  const geoCache = useRef({})
+
+  const apply = (data) => {
+    if (!data) return
+    setStats(data)
+    setLastUpdate(Date.now())
+    const ips = (data.top_ips || []).map((t) => t.ip).filter((ip) => ip && !geoCache.current[ip])
+    if (ips.length > 0) {
+      fetch(`${API_URL}/ai/geo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ips }),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d?.results) {
+            Object.assign(geoCache.current, d.results)
+            setGeoMap({ ...geoCache.current })
+          }
+        })
+        .catch(() => {})
+    }
+  }
 
   const fetchSession = () =>
     fetch(`${API_URL}/ai/session`)
@@ -94,11 +200,6 @@ export default function AdminReport() {
   }
 
   useEffect(() => {
-    const apply = (data) => {
-      if (!data) return
-      setStats(data)
-      setLastUpdate(Date.now())
-    }
     const fetchHistory = () =>
       fetch(`${API_URL}/ai/history?hours=24`)
         .then((r) => (r.ok ? r.json() : null))
@@ -363,6 +464,9 @@ export default function AdminReport() {
                 )}
               </section>
             </div>
+
+            {/* Top source IPs + location overview */}
+            <TopIpsSection topIps={stats?.top_ips} geoMap={geoMap} />
 
             {/* 24h history (persisted in PostgreSQL) */}
             {historyEnabled && (

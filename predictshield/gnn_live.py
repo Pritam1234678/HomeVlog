@@ -120,6 +120,14 @@ class GNNLive:
         for ip, i in ip_ids.items():
             self.timeline.setdefault(ip, []).append((win, float(risk[i])))
 
+    def latest_risk(self, ip: str) -> float:
+        """Most recent causal risk recorded for this IP (0.0 if unseen)."""
+        with self.lock:
+            entries = self.timeline.get(ip)
+            if not entries:
+                return 0.0
+            return entries[-1][1]
+
     def _risk_for(self, ip, ts):
         entries = self.timeline.get(ip)
         if not entries:
