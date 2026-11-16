@@ -324,56 +324,88 @@ export default function AdminReport() {
 
   if (!adminToken) {
     return (
-      <div className="flex min-h-[calc(100vh-73px)] items-center justify-center bg-ink px-6 text-paper">
-        <div className="w-full max-w-md rounded-3xl border border-white/10 bg-white/[0.03] p-10">
-          <p className="mb-2 text-xs font-medium uppercase tracking-[0.25em] text-amber">
-            PredictShield AI
-          </p>
-          <h1 className="font-serif text-3xl font-medium">Admin access</h1>
-          <p className="mt-2 text-sm text-paper/50">
-            Sign in to open the Live Threat Monitor. This area is restricted.
-          </p>
-          <form onSubmit={handleAdminLogin} className="mt-8 space-y-5">
-            <div>
-              <label htmlFor="admin-user" className="mb-2 block text-sm font-medium">
-                Username
-              </label>
-              <input
-                id="admin-user"
-                type="email"
-                required
-                value={loginForm.username}
-                onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
-                placeholder="admin@example.com"
-                className="w-full rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-paper placeholder:text-paper/30 focus:border-amber focus:outline-none"
-              />
+      <div className="flex min-h-[calc(100vh-73px)] items-center justify-center bg-slate-950 px-6">
+        <div className="w-full max-w-md">
+          <div className="mb-8 text-center">
+            <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-slate-700 bg-slate-900 shadow-lg">
+              <svg
+                className="h-7 w-7 text-slate-300"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={1.5}
+                stroke="currentColor"
+                aria-hidden="true"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"
+                />
+              </svg>
             </div>
-            <div>
-              <label htmlFor="admin-pass" className="mb-2 block text-sm font-medium">
-                Password
-              </label>
-              <input
-                id="admin-pass"
-                type="password"
-                required
-                value={loginForm.password}
-                onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
-                placeholder="••••••••"
-                className="w-full rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-paper placeholder:text-paper/30 focus:border-amber focus:outline-none"
-              />
-            </div>
-            {loginError && (
-              <p className="rounded-xl border border-clay/30 bg-clay/10 px-4 py-3 text-sm text-clay">
-                {loginError}
-              </p>
-            )}
-            <button
-              type="submit"
-              className="w-full rounded-xl bg-amber py-3.5 text-sm font-bold text-ink transition hover:bg-amber/90"
-            >
-              Sign in
-            </button>
-          </form>
+            <h1 className="text-2xl font-semibold text-white">Security Console</h1>
+            <p className="mt-2 text-sm text-slate-400">
+              Threat Monitor · Authorized personnel only
+            </p>
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-900 p-8 shadow-2xl">
+            <form onSubmit={handleAdminLogin} className="space-y-5">
+              <div>
+                <label
+                  htmlFor="admin-user"
+                  className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-400"
+                >
+                  Username
+                </label>
+                <input
+                  id="admin-user"
+                  type="email"
+                  autoComplete="username"
+                  required
+                  value={loginForm.username}
+                  onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
+                  placeholder="admin@example.com"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-sm text-white placeholder-slate-500 transition focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="admin-pass"
+                  className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-400"
+                >
+                  Password
+                </label>
+                <input
+                  id="admin-pass"
+                  type="password"
+                  autoComplete="current-password"
+                  required
+                  value={loginForm.password}
+                  onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+                  placeholder="Enter your password"
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-4 py-3 text-sm text-white placeholder-slate-500 transition focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                />
+              </div>
+
+              {loginError && (
+                <p className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+                  {loginError}
+                </p>
+              )}
+
+              <button
+                type="submit"
+                className="w-full rounded-lg bg-white py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-slate-900"
+              >
+                Sign in
+              </button>
+            </form>
+          </div>
+
+          <p className="mt-6 text-center text-xs text-slate-600">
+            Restricted area · All activity is monitored and logged
+          </p>
         </div>
       </div>
     )
