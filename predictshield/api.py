@@ -147,10 +147,9 @@ FIREWALL_HELPER = "/usr/local/bin/ps-firewall"
 
 
 def _firewall_sync():
-    """Make the iptables ruleset match the active blocklist. Best-effort:
-    if the firewall call fails, the engine-level 403 gate still applies."""
-    if not _BLOCKED:
-        return
+    """Make the iptables ruleset match the active blocklist (empty list
+    clears every ps-block rule). Best-effort: if the firewall call fails,
+    the engine-level 403 gate still applies."""
     try:
         active = [ip for ip, until in _BLOCKED.items()
                   if until > time.time() and not _is_private_ip(ip)]
