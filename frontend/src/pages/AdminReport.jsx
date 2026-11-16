@@ -145,6 +145,9 @@ function TopIpsSection({ topIps, geoMap }) {
 }
 
 export default function AdminReport() {
+  const [adminToken, setAdminToken] = useState(() => sessionStorage.getItem('ps_admin_token') || '')
+  const [loginForm, setLoginForm] = useState({ username: '', password: '' })
+  const [loginError, setLoginError] = useState('')
   const [stats, setStats] = useState(null)
   const [history, setHistory] = useState(null)
   const [session, setSession] = useState(null)
@@ -155,13 +158,42 @@ export default function AdminReport() {
   const pollRef = useRef(null)
   const geoCache = useRef({})
 
+  const authHeaders = () => (adminToken ? { 'X-Admin-Token': adminToken } : {})
+  const adminFetch = (path, opts = {}) =>
+    fetch(path, { ...opts, headers: { ...(opts.headers || {}), ...authHeaders() } })
+
+  const handleAdminLogin = async (e) => {
+    e.preventDefault()
+    setLoginError('')
+    try {
+      const r = await fetch(`${API_URL}/ai/admin/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(loginForm),
+      })
+      const d = await r.json()
+      if (!r.ok) throw new Error(typeof d.detail === 'string' ? d.detail : 'Login failed')
+      sessionStorage.setItem('ps_admin_token', d.token)
+      setAdminToken(d.token)
+    } catch (err) {
+      setLoginError(err.message)
+    }
+  }
+
+  const adminLogout = () => {
+    sessionStorage.removeItem('ps_admin_token')
+    setAdminToken('')
+    setStats(null)
+    setConnected(false)
+  }
+
   const apply = (data) => {
     if (!data) return
     setStats(data)
     setLastUpdate(Date.now())
     const ips = (data.top_ips || []).map((t) => t.ip).filter((ip) => ip && !geoCache.current[ip])
     if (ips.length > 0) {
-      fetch(`${API_URL}/ai/geo`, {
+      adminFetch(`${API_URL}/ai/geo`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ips }),
@@ -178,36 +210,53 @@ export default function AdminReport() {
   }
 
   const fetchSession = () =>
-    fetch(`${API_URL}/ai/session`)
+    adminFetch(`${API_URL}/ai/session`)
       .then((r) => (r.ok ? r.json() : null))
       .then(setSession)
       .catch(() => {})
 
   const startSession = async () => {
     try {
-      await fetch(`${API_URL}/ai/session/start`, { method: 'POST' })
-      setSession(await (await fetch(`${API_URL}/ai/session`)).json())
-      fetch(`${API_URL}/ai/stats`).then((r) => r.json()).then(setStats).catch(() => {})
+      await adminFetch(`${API_URL}/ai/session/start`, { method: 'POST' })
+      setSession(await (await adminFetch(`${API_URL}/ai/session`)).json())
+      adminFetch(`${API_URL}/ai/stats`).then((r) => r.json()).then(setStats).catch(() => {})
     } catch {}
   }
 
   const stopSession = async () => {
     try {
-      await fetch(`${API_URL}/ai/session/stop`, { method: 'POST' })
-      setSession(await (await fetch(`${API_URL}/ai/session`)).json())
-      fetch(`${API_URL}/ai/stats`).then((r) => r.json()).then(setStats).catch(() => {})
+      await adminFetch(`${API_URL}/ai/session/stop`, { method: 'POST' })
+      setSession(await (await adminFetch(`${API_URL}/ai/session`)).json())
+      adminFetch(`${API_URL}/ai/stats`).then((r) => r.json()).then(setStats).catch(() => {})
     } catch {}
   }
 
   useEffect(() => {
+    if (!adminToken) {
+      setStats(null)
+      setConnected(false)
+      return
+    }
+    const apply = (data) => {
+      if (!data) return
+      setStats(data)
+      setLastUpdate(Date.now())
+    }
     const fetchHistory = () =>
-      fetch(`${API_URL}/ai/history?hours=24`)
+      adminFetch(`${API_URL}/ai/history?hours=24`)
         .then((r) => (r.ok ? r.json() : null))
         .then(setHistory)
         .catch(() => {})
     const fetchOnce = () =>
-      fetch(`${API_URL}/ai/stats`)
-        .then((r) => (r.ok ? r.json() : null))
+      adminFetch(`${API_URL}/ai/stats`)
+        .then((r) => {
+          if (r.status === 401) {
+            sessionStorage.removeItem('ps_admin_token')
+            setAdminToken('')
+            return null
+          }
+          return r.ok ? r.json() : null
+        })
         .then(apply)
         .catch(() => {})
 
@@ -231,7 +280,7 @@ export default function AdminReport() {
     fetchOnce()
     let es = null
     try {
-      es = new EventSource(`${API_URL}/ai/stream`)
+      es = new EventSource(`${API_URL}/ai/stream?token=${encodeURIComponent(adminToken)}`)
       es.onopen = () => {
         setConnected(true)
         stopPolling()
@@ -255,7 +304,7 @@ export default function AdminReport() {
       clearInterval(clock)
       clearInterval(historyTimer)
     }
-  }, [])
+  }, [adminToken])
 
   const attacks = stats?.attacks_by_class || {}
   const maxClass = Math.max(1, ...Object.values(attacks))
@@ -273,6 +322,63 @@ export default function AdminReport() {
   }
   const maxHourFlows = Math.max(1, ...dayBars.map((b) => b.flows))
 
+  if (!adminToken) {
+    return (
+      <div className="flex min-h-[calc(100vh-73px)] items-center justify-center bg-ink px-6 text-paper">
+        <div className="w-full max-w-md rounded-3xl border border-white/10 bg-white/[0.03] p-10">
+          <p className="mb-2 text-xs font-medium uppercase tracking-[0.25em] text-amber">
+            PredictShield AI
+          </p>
+          <h1 className="font-serif text-3xl font-medium">Admin access</h1>
+          <p className="mt-2 text-sm text-paper/50">
+            Sign in to open the Live Threat Monitor. This area is restricted.
+          </p>
+          <form onSubmit={handleAdminLogin} className="mt-8 space-y-5">
+            <div>
+              <label htmlFor="admin-user" className="mb-2 block text-sm font-medium">
+                Username
+              </label>
+              <input
+                id="admin-user"
+                type="email"
+                required
+                value={loginForm.username}
+                onChange={(e) => setLoginForm({ ...loginForm, username: e.target.value })}
+                placeholder="admin@example.com"
+                className="w-full rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-paper placeholder:text-paper/30 focus:border-amber focus:outline-none"
+              />
+            </div>
+            <div>
+              <label htmlFor="admin-pass" className="mb-2 block text-sm font-medium">
+                Password
+              </label>
+              <input
+                id="admin-pass"
+                type="password"
+                required
+                value={loginForm.password}
+                onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
+                placeholder="••••••••"
+                className="w-full rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-paper placeholder:text-paper/30 focus:border-amber focus:outline-none"
+              />
+            </div>
+            {loginError && (
+              <p className="rounded-xl border border-clay/30 bg-clay/10 px-4 py-3 text-sm text-clay">
+                {loginError}
+              </p>
+            )}
+            <button
+              type="submit"
+              className="w-full rounded-xl bg-amber py-3.5 text-sm font-bold text-ink transition hover:bg-amber/90"
+            >
+              Sign in
+            </button>
+          </form>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-[calc(100vh-73px)] bg-ink text-paper">
       <div className="mx-auto max-w-6xl px-6 py-10">
@@ -287,6 +393,13 @@ export default function AdminReport() {
             </h1>
           </div>
           <div className="flex items-center gap-3 text-sm">
+            <button
+              onClick={adminLogout}
+              className="rounded-full border border-white/15 px-3 py-1.5 text-xs text-paper/60 transition hover:border-clay hover:text-clay"
+              title="Clear admin session"
+            >
+              admin logout
+            </button>
             <span
               className={`inline-flex h-2.5 w-2.5 rounded-full ${
                 connected ? 'animate-pulse bg-forest-light' : 'bg-clay'

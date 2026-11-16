@@ -10,6 +10,8 @@ Artifacts live in ./models - see models/README.md. Missing artifacts degrade
 gracefully: /ai/predict answers with model_status="not_deployed".
 """
 import asyncio
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -19,10 +21,11 @@ import time
 import urllib.request
 from collections import Counter, deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import numpy as np
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -49,6 +52,29 @@ FUSION_CALIB_JSON = _path("fusion_calib.json")
 LABEL_MAP_JSON = _path("label_map.json")
 GNN_ONNX = _path("gat.onnx")
 GNN_SCALER_JSON = _path("gnn_scaler.json")
+
+# Admin gate for the monitoring dashboard (separate from HomeVlog login).
+# Credentials come from the environment file - never hardcoded in git.
+ADMIN_USER = os.getenv("ADMIN_USER", "")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "").strip('"')
+
+
+def _admin_token() -> str:
+    """Day-scoped admin token (stateless, survives engine restarts)."""
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return hashlib.sha256(
+        f"ps-admin|{ADMIN_USER}|{ADMIN_PASS}|{day}".encode()
+    ).hexdigest()
+
+
+def _require_admin(
+    request: Request,
+    x_admin_token: str = Header(default=""),
+    token: str = Query(default=""),
+) -> None:
+    supplied = x_admin_token or token
+    if not ADMIN_USER or not supplied or supplied != _admin_token():
+        raise HTTPException(status_code=401, detail="Admin auth required")
 
 RISK_ACTIONS = {
     "BENIGN": ["allow"],
@@ -815,14 +841,31 @@ def health():
     }
 
 
+class AdminLogin(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/ai/admin/login")
+def admin_login(body: AdminLogin):
+    """Separate admin login for the threat-monitor dashboard."""
+    if not ADMIN_USER or not ADMIN_PASS:
+        raise HTTPException(status_code=401, detail="Admin auth not configured")
+    ok = (hmac.compare_digest(body.username, ADMIN_USER)
+          and hmac.compare_digest(body.password, ADMIN_PASS))
+    if not ok:
+        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+    return {"token": _admin_token(), "username": ADMIN_USER}
+
+
 @app.get("/ai/stats")
-def stats():
+def stats(_: None = Depends(_require_admin)):
     """Aggregate live stats for the /admin/report dashboard (DB-backed)."""
     return _stats_payload()
 
 
 @app.get("/ai/alerts")
-def alerts(limit: int = 50):
+def alerts(limit: int = 50, _: None = Depends(_require_admin)):
     """Recent attack alerts, newest first."""
     limit = max(1, min(limit, 500))
     if _DB["enabled"]:
@@ -864,7 +907,7 @@ def _is_private_ip(ip: str) -> bool:
 
 
 @app.post("/ai/geo")
-def geo_lookup(body: GeoRequest):
+def geo_lookup(body: GeoRequest, _: None = Depends(_require_admin)):
     """Resolve IP -> country/city (ip-api.com free tier, cached per IP).
     Private/reserved IPs resolve to 'Local / Private network'."""
     out: Dict[str, Any] = {}
@@ -909,7 +952,7 @@ def geo_lookup(body: GeoRequest):
 
 
 @app.get("/ai/history")
-def history(hours: int = 24):
+def history(hours: int = 24, _: None = Depends(_require_admin)):
     """Per-hour flows/attacks rollup from the database (persistent history)."""
     hours = max(1, min(hours, 720))
     if not _DB["enabled"]:
@@ -938,7 +981,7 @@ def history(hours: int = 24):
 
 
 @app.get("/ai/stream")
-async def stream(interval: float = 2.0):
+async def stream(interval: float = 2.0, _: None = Depends(_require_admin)):
     """SSE: push live stats to the dashboard every `interval` seconds."""
     interval = max(1.0, min(interval, 10.0))
 
@@ -959,7 +1002,7 @@ async def stream(interval: float = 2.0):
 
 
 @app.post("/ai/session/start")
-def session_start():
+def session_start(_: None = Depends(_require_admin)):
     """Start a monitoring session: every stat/alert is now counted from this
     moment only (DB history keeps recording regardless)."""
     _session["active"] = True
@@ -981,7 +1024,7 @@ def session_start():
 
 
 @app.post("/ai/session/stop")
-def session_stop():
+def session_stop(_: None = Depends(_require_admin)):
     """Stop the session but keep its summary visible until the next start."""
     if _session["active"]:
         _session["active"] = False
@@ -992,7 +1035,7 @@ def session_stop():
 
 
 @app.get("/ai/session")
-def session_status():
+def session_status(_: None = Depends(_require_admin)):
     return {"active": _session["active"], "started_at": _session["started_at"],
             "ended_at": _session["ended_at"]}
 
