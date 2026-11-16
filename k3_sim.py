@@ -57,6 +57,50 @@ def build_pool(per_class=40):
     return pool
 
 
+def topology_for(label, i, ts, attacker_ip):
+    """Attack-consistent per-flow topology so the GNN sees what the models saw."""
+    src_port = random.randint(40000, 60000)
+    if label in ("DDoS", "DoS Hulk", "DoS GoldenEye"):
+        return {"src_ip": attacker_ip, "dst_ip": "10.0.0.28", "src_port": src_port,
+                "dst_port": 80, "protocol": 6, "ts": ts,
+                "duration_us": random.uniform(100_000, 900_000),
+                "fwd_pkts": random.randint(80, 300), "bwd_pkts": random.randint(5, 20),
+                "fwd_bytes": random.randint(40_000, 500_000),
+                "bwd_bytes": random.randint(1_000, 20_000),
+                "avg_pkt": random.uniform(400, 900), "max_pkt": 1460.0,
+                "syn": random.randint(20, 60), "rst": random.randint(0, 2),
+                "fin": random.randint(1, 3), "ack": random.randint(60, 200)}
+    if label == "SSH-Patator":
+        return {"src_ip": attacker_ip, "dst_ip": "10.0.0.28", "src_port": src_port,
+                "dst_port": 22, "protocol": 6, "ts": ts,
+                "duration_us": random.uniform(100_000, 300_000),
+                "fwd_pkts": random.randint(20, 60), "bwd_pkts": random.randint(5, 15),
+                "fwd_bytes": random.randint(2_000, 8_000),
+                "bwd_bytes": random.randint(1_000, 5_000),
+                "avg_pkt": random.uniform(50, 120), "max_pkt": 200.0,
+                "syn": random.randint(5, 15), "rst": random.randint(5, 20),
+                "fin": random.randint(0, 2), "ack": random.randint(15, 50)}
+    if label == "PortScan":
+        return {"src_ip": attacker_ip, "dst_ip": "10.0.0.28", "src_port": src_port,
+                "dst_port": random.choice([21, 22, 23, 25, 80, 110, 135, 139, 443, 445, 3389]),
+                "protocol": 6, "ts": ts, "duration_us": random.uniform(1_000, 20_000),
+                "fwd_pkts": random.randint(2, 4), "bwd_pkts": random.randint(0, 2),
+                "fwd_bytes": random.randint(40, 180), "bwd_bytes": random.randint(0, 120),
+                "avg_pkt": random.uniform(40, 70), "max_pkt": 120.0,
+                "syn": random.randint(2, 4), "rst": random.randint(1, 3),
+                "fin": 0, "ack": random.randint(0, 2)}
+    # Bot / generic
+    return {"src_ip": attacker_ip, "dst_ip": "10.0.0.28", "src_port": src_port,
+            "dst_port": random.choice([80, 443, 8080]), "protocol": 6, "ts": ts,
+            "duration_us": random.uniform(50_000, 500_000),
+            "fwd_pkts": random.randint(10, 40), "bwd_pkts": random.randint(5, 25),
+            "fwd_bytes": random.randint(1_000, 40_000),
+            "bwd_bytes": random.randint(500, 30_000),
+            "avg_pkt": random.uniform(60, 500), "max_pkt": random.uniform(200, 1400),
+            "syn": random.randint(1, 8), "rst": random.randint(0, 3),
+            "fin": random.randint(0, 3), "ack": random.randint(5, 30)}
+
+
 def main():
     ap = argparse.ArgumentParser(description="PredictShield k3 attack simulator")
     ap.add_argument("--ip", default="185.220.101.45", help="attacker source IP shown on the dashboard")
@@ -77,25 +121,12 @@ def main():
     try:
         while True:
             batch = random.sample(pool, min(args.burst, len(pool)))
+            ts = time.time()
             for row in batch:
                 body = {
                     "features": row["feats"],
                     "device_id": "k3-attack-sim",
-                    "topology": {
-                        "src_ip": args.ip, "dst_ip": "10.0.0.28",
-                        "src_port": random.randint(40000, 60000),
-                        "dst_port": random.choice([22, 80, 443, 21]),
-                        "protocol": 6, "ts": time.time(),
-                        "duration_us": random.uniform(5_000, 900_000),
-                        "fwd_pkts": random.randint(4, 40),
-                        "bwd_pkts": random.randint(1, 20),
-                        "fwd_bytes": random.randint(200, 500_000),
-                        "bwd_bytes": random.randint(100, 400_000),
-                        "avg_pkt": random.uniform(40, 800),
-                        "max_pkt": random.uniform(100, 1500),
-                        "syn": random.randint(1, 6), "rst": random.randint(0, 3),
-                        "fin": random.randint(0, 3), "ack": random.randint(2, 40),
-                    },
+                    "topology": topology_for(row["label"], sent, ts, args.ip),
                 }
                 try:
                     req = urllib.request.Request(
