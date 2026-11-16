@@ -44,3 +44,6 @@ frontend/dist-ssr/
 /cicids2017_combined.csv
 /cicids2017_generated_combined.csv
 /cicids2017_training_ready.csv
+
+# LibreOffice lock files
+.~lock.*
