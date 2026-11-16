@@ -7,8 +7,8 @@ const RISK_STYLES = {
   LOW: 'bg-forest-light/15 text-forest-light border-forest-light/30',
 }
 
-function timeAgo(ts) {
-  const s = Math.max(0, Math.round(Date.now() / 1000 - ts))
+function timeAgo(ts, refNow) {
+  const s = Math.max(0, Math.round((refNow || Date.now() / 1000) - ts))
   if (s < 5) return 'just now'
   if (s < 60) return `${s}s ago`
   const m = Math.floor(s / 60)
@@ -31,7 +31,7 @@ function StatCard({ label, value, accent }) {
   )
 }
 
-function AlertRow({ alert }) {
+function AlertRow({ alert, refNow }) {
   const riskStyle = RISK_STYLES[alert.risk_level] || RISK_STYLES.LOW
   return (
     <li className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 transition hover:border-white/20">
@@ -44,7 +44,7 @@ function AlertRow({ alert }) {
           {(alert.confidence * 100).toFixed(1)}%
         </span>
         <span className="ml-auto text-[11px] text-paper/40" title={fmtTime(alert.ts)}>
-          {timeAgo(alert.ts)}
+          {timeAgo(alert.ts, refNow)}
         </span>
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-paper/50">
@@ -65,10 +65,33 @@ function AlertRow({ alert }) {
 export default function AdminReport() {
   const [stats, setStats] = useState(null)
   const [history, setHistory] = useState(null)
+  const [session, setSession] = useState(null)
   const [connected, setConnected] = useState(false)
   const [lastUpdate, setLastUpdate] = useState(null)
   const [, setTick] = useState(0)
   const pollRef = useRef(null)
+
+  const fetchSession = () =>
+    fetch(`${API_URL}/ai/session`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setSession)
+      .catch(() => {})
+
+  const startSession = async () => {
+    try {
+      await fetch(`${API_URL}/ai/session/start`, { method: 'POST' })
+      setSession(await (await fetch(`${API_URL}/ai/session`)).json())
+      fetch(`${API_URL}/ai/stats`).then((r) => r.json()).then(setStats).catch(() => {})
+    } catch {}
+  }
+
+  const stopSession = async () => {
+    try {
+      await fetch(`${API_URL}/ai/session/stop`, { method: 'POST' })
+      setSession(await (await fetch(`${API_URL}/ai/session`)).json())
+      fetch(`${API_URL}/ai/stats`).then((r) => r.json()).then(setStats).catch(() => {})
+    } catch {}
+  }
 
   useEffect(() => {
     const apply = (data) => {
@@ -89,6 +112,7 @@ export default function AdminReport() {
 
     fetchOnce()
     fetchHistory()
+    fetchSession()
     const historyTimer = setInterval(fetchHistory, 30000)
 
     const startPolling = () => {
@@ -176,6 +200,72 @@ export default function AdminReport() {
           </div>
         </div>
 
+        {/* Session control */}
+        {(() => {
+          const active = session?.active
+          const started = session?.started_at
+          const ended = session?.ended_at
+          const serverNow = stats?.ts || session?.started_at || Date.now() / 1000
+          const durSec = started
+            ? Math.max(0, Math.round((active ? serverNow : (ended || serverNow)) - started))
+            : 0
+          const durTxt = `${String(Math.floor(durSec / 60)).padStart(2, '0')}:${String(durSec % 60).padStart(2, '0')}`
+          return (
+            <div
+              className={`mt-6 flex flex-wrap items-center gap-4 rounded-3xl border p-5 transition ${
+                active
+                  ? 'border-amber/40 bg-amber/5'
+                  : ended
+                  ? 'border-forest-light/30 bg-forest-light/5'
+                  : 'border-white/10 bg-white/[0.03]'
+              }`}
+            >
+              <div className="flex-1 min-w-[240px]">
+                <div className="flex items-center gap-2">
+                  {active ? (
+                    <>
+                      <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-amber" />
+                      <span className="font-serif text-lg font-medium text-amber">
+                        SESSION LIVE · {durTxt}
+                      </span>
+                    </>
+                  ) : ended ? (
+                    <span className="font-serif text-lg font-medium text-forest-light">
+                      SESSION COMPLETE · {durTxt}
+                    </span>
+                  ) : (
+                    <span className="font-serif text-lg font-medium text-paper">
+                      Ready to monitor
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 text-xs leading-relaxed text-paper/50">
+                  {active
+                    ? 'Counting every flow and attack SINCE you pressed start - fire your test traffic now.'
+                    : ended
+                    ? 'Summary frozen. Start a new session to reset the counters.'
+                    : 'Press start, then send your test traffic - only what happens after start gets counted.'}
+                </p>
+              </div>
+              {active ? (
+                <button
+                  onClick={stopSession}
+                  className="rounded-full border border-clay/40 bg-clay/20 px-7 py-3 text-sm font-bold text-paper transition hover:bg-clay/40"
+                >
+                  ■ STOP SESSION
+                </button>
+              ) : (
+                <button
+                  onClick={startSession}
+                  className="rounded-full bg-amber px-7 py-3 text-sm font-bold text-ink transition hover:bg-amber/90"
+                >
+                  ▶ START MONITORING
+                </button>
+              )}
+            </div>
+          )
+        })()}
+
         {!stats ? (
           <p className="mt-24 text-center text-paper/50">Connecting to the AI engine…</p>
         ) : (
@@ -237,8 +327,9 @@ export default function AdminReport() {
                   ))}
                 </div>
                 <p className="mt-6 text-xs leading-relaxed text-paper/40">
-                  {stats.flows_last_hour ?? 0} flows analyzed in the last hour · history
-                  persisted in PostgreSQL.
+                  {session?.active || session?.ended_at
+                    ? `${stats.flows_last_hour ?? 0} flows in this session · history persisted in PostgreSQL.`
+                    : `${stats.flows_last_hour ?? 0} flows analyzed in the last hour · history persisted in PostgreSQL.`}
                 </p>
               </section>
 
@@ -266,7 +357,7 @@ export default function AdminReport() {
                 ) : (
                   <ul className="mt-5 max-h-[520px] space-y-3 overflow-y-auto pr-1">
                     {alerts.map((alert, i) => (
-                      <AlertRow key={`${alert.ts}-${i}`} alert={alert} />
+                      <AlertRow key={`${alert.ts}-${i}`} alert={alert} refNow={stats?.ts} />
                     ))}
                   </ul>
                 )}

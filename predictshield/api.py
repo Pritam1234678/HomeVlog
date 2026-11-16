@@ -91,6 +91,17 @@ _MONITOR: Dict[str, Any] = {
     "alerts": deque(maxlen=1000),           # attack verdicts, oldest -> newest
 }
 
+# Monitoring session (demo/live-ops): press START on the dashboard and every
+# stat/alert is counted from that moment only. Purely a view over the data -
+# DB history keeps recording everything regardless.
+_session: Dict[str, Any] = {
+    "active": False,
+    "started_at": None,      # engine-clock epoch (in-memory stats use this)
+    "db_started_at": None,   # DB-clock epoch (DB session queries use this)
+    "ended_at": None,
+    "devices": set(),
+}
+
 
 def _record(device_id: str, resp: "PredictResponse") -> None:
     """Record a real verdict (warmup_xgboost / fusion_5model) into the monitor."""
@@ -103,6 +114,8 @@ def _record(device_id: str, resp: "PredictResponse") -> None:
     _enqueue_flow(device_id, is_attack)
     devices = _MONITOR["devices"]
     devices[device_id] = now
+    if _session["active"]:
+        _session["devices"].add(device_id)
     if len(devices) > 500:
         cutoff = now - 7200
         for key in [k for k, t in devices.items() if t < cutoff]:
@@ -126,24 +139,41 @@ def _record(device_id: str, resp: "PredictResponse") -> None:
         _enqueue_alert(alert)
 
 
-def _build_stats() -> dict:
+def _build_stats(since: float = None) -> dict:
     now = time.time()
     recent = _MONITOR["recent_flows"]
     while recent and recent[0][0] < now - 3600:
         recent.popleft()
-    attacks_last_hour = sum(1 for _, a in recent if a)
-    active_devices = sum(1 for t in _MONITOR["devices"].values() if t >= now - 3600)
-    by_class = dict(sorted(_MONITOR["by_class"].items(), key=lambda kv: -kv[1]))
+    if since is not None:
+        in_session = [t for t in recent if t[0] >= since]
+        flows_count = len(in_session)
+        attacks_count = sum(1 for _, a in in_session if a)
+        session_alerts = [a for a in _MONITOR["alerts"] if a["ts"] >= since]
+        by_class: Dict[str, int] = {}
+        by_risk = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        for a in session_alerts:
+            by_class[a["attack_class"]] = by_class.get(a["attack_class"], 0) + 1
+            if a["risk_level"] in by_risk:
+                by_risk[a["risk_level"]] += 1
+        active_devices = len(_session["devices"])
+        recent_alerts = session_alerts[-12:][::-1]
+    else:
+        attacks_count = sum(1 for _, a in recent if a)
+        flows_count = len(recent)
+        active_devices = sum(1 for t in _MONITOR["devices"].values() if t >= now - 3600)
+        by_class = dict(sorted(_MONITOR["by_class"].items(), key=lambda kv: -kv[1]))
+        by_risk = dict(_MONITOR["by_risk"])
+        recent_alerts = list(_MONITOR["alerts"])[-12:][::-1]
     return {
         "ts": now,
-        "flows_total": _MONITOR["flows_total"],
-        "attacks_total": _MONITOR["attacks_total"],
-        "flows_last_hour": len(recent),
-        "attacks_last_hour": attacks_last_hour,
+        "flows_total": _MONITOR["flows_total"] if since is None else flows_count,
+        "attacks_total": _MONITOR["attacks_total"] if since is None else attacks_count,
+        "flows_last_hour": flows_count,
+        "attacks_last_hour": attacks_count,
         "active_devices": active_devices,
         "attacks_by_class": by_class,
-        "risk_levels": dict(_MONITOR["by_risk"]),
-        "recent_alerts": list(_MONITOR["alerts"])[-12:][::-1],
+        "risk_levels": by_risk,
+        "recent_alerts": recent_alerts,
     }
 
 
@@ -389,35 +419,74 @@ def _enqueue_alert(alert: Dict[str, Any]) -> None:
         pass
 
 
-def _build_stats_db() -> Dict[str, Any]:
+def _build_stats_db(since: float = None) -> Dict[str, Any]:
     conn = _db_get_conn()
-    flows_total = conn.execute(
-        "SELECT flows_total FROM ai_counters WHERE id = 1"
-    ).fetchone()[0]
-    by_class_rows = conn.execute(
-        "SELECT attack_class, total FROM ai_class_totals ORDER BY total DESC"
-    ).fetchall()
-    risk_rows = conn.execute(
-        "SELECT risk_level, total FROM ai_risk_totals"
-    ).fetchall()
-    lh = conn.execute(
-        """
-        SELECT count(*), count(*) FILTER (WHERE is_attack),
-               count(DISTINCT device_id)
-        FROM ai_flow_events WHERE ts > now() - interval '1 hour'
-        """
-    ).fetchone()
-    alert_rows = conn.execute(
-        """
-        SELECT extract(epoch from ts), device_id, attack_class, confidence,
-               risk_level, model_status, defense_actions
-        FROM ai_alerts ORDER BY id DESC LIMIT 12
-        """
-    ).fetchall()
+    if since is not None:
+        flows_total = conn.execute(
+            "SELECT count(*) FROM ai_flow_events WHERE ts >= to_timestamp(%s)",
+            (since,),
+        ).fetchone()[0]
+        attacks_total = conn.execute(
+            "SELECT count(*) FROM ai_flow_events WHERE ts >= to_timestamp(%s)"
+            " AND is_attack",
+            (since,),
+        ).fetchone()[0]
+        by_class_rows = conn.execute(
+            "SELECT attack_class, count(*) FROM ai_alerts WHERE ts >= to_timestamp(%s)"
+            " GROUP BY attack_class ORDER BY count(*) DESC",
+            (since,),
+        ).fetchall()
+        risk_rows = conn.execute(
+            "SELECT risk_level, count(*) FROM ai_alerts WHERE ts >= to_timestamp(%s)"
+            " GROUP BY risk_level",
+            (since,),
+        ).fetchall()
+        lh = conn.execute(
+            """
+            SELECT count(*), count(*) FILTER (WHERE is_attack),
+                   count(DISTINCT device_id)
+            FROM ai_flow_events WHERE ts >= to_timestamp(%s)
+            """,
+            (since,),
+        ).fetchone()
+        alert_rows = conn.execute(
+            """
+            SELECT extract(epoch from ts), device_id, attack_class, confidence,
+                   risk_level, model_status, defense_actions
+            FROM ai_alerts WHERE ts >= to_timestamp(%s)
+            ORDER BY id DESC LIMIT 12
+            """,
+            (since,),
+        ).fetchall()
+    else:
+        flows_total = conn.execute(
+            "SELECT flows_total FROM ai_counters WHERE id = 1"
+        ).fetchone()[0]
+        by_class_rows = conn.execute(
+            "SELECT attack_class, total FROM ai_class_totals ORDER BY total DESC"
+        ).fetchall()
+        risk_rows = conn.execute(
+            "SELECT risk_level, total FROM ai_risk_totals"
+        ).fetchall()
+        lh = conn.execute(
+            """
+            SELECT count(*), count(*) FILTER (WHERE is_attack),
+                   count(DISTINCT device_id)
+            FROM ai_flow_events WHERE ts > now() - interval '1 hour'
+            """
+        ).fetchone()
+        alert_rows = conn.execute(
+            """
+            SELECT extract(epoch from ts), device_id, attack_class, confidence,
+                   risk_level, model_status, defense_actions
+            FROM ai_alerts ORDER BY id DESC LIMIT 12
+            """
+        ).fetchall()
     return {
         "ts": time.time(),
         "flows_total": int(flows_total),
-        "attacks_total": int(sum(t for _, t in by_class_rows)),
+        "attacks_total": int(attacks_total if since is not None
+                             else sum(t for _, t in by_class_rows)),
         "flows_last_hour": int(lh[0]),
         "attacks_last_hour": int(lh[1]),
         "active_devices": int(lh[2]),
@@ -435,12 +504,23 @@ def _build_stats_db() -> Dict[str, Any]:
 
 
 def _stats_payload() -> Dict[str, Any]:
+    session_on = _session["started_at"] is not None
     if _DB["enabled"]:
+        since_db = _session["db_started_at"] if session_on else None
         try:
-            return _build_stats_db()
+            payload = _build_stats_db(since_db)
         except Exception as exc:
             print(f"[db] stats read failed, using in-memory: {exc}")
-    return _build_stats()
+            payload = _build_stats(_session["started_at"] if session_on else None)
+    else:
+        payload = _build_stats(_session["started_at"] if session_on else None)
+    payload["session"] = {
+        "active": _session["active"],
+        "started_at": _session["started_at"],
+        "ended_at": _session["ended_at"],
+        "server_now": time.time(),
+    }
+    return payload
 
 
 def _load():
@@ -734,6 +814,45 @@ async def stream(interval: float = 2.0):
             "Connection": "keep-alive",
         },
     )
+
+
+@app.post("/ai/session/start")
+def session_start():
+    """Start a monitoring session: every stat/alert is now counted from this
+    moment only (DB history keeps recording regardless)."""
+    _session["active"] = True
+    _session["started_at"] = time.time()
+    _session["ended_at"] = None
+    _session["devices"] = set()
+    _session["db_started_at"] = None
+    if _DB["enabled"]:
+        try:
+            conn = _db_get_conn()
+            # use the DB's own clock - client/host clocks can be skewed
+            _session["db_started_at"] = float(
+                conn.execute("SELECT extract(epoch from now())").fetchone()[0]
+            )
+        except Exception as exc:
+            print(f"[session] db clock unavailable: {exc}")
+    print(f"[session] STARTED at {_session['started_at']:.0f}")
+    return {"active": True, "started_at": _session["started_at"]}
+
+
+@app.post("/ai/session/stop")
+def session_stop():
+    """Stop the session but keep its summary visible until the next start."""
+    if _session["active"]:
+        _session["active"] = False
+        _session["ended_at"] = time.time()
+        print(f"[session] STOPPED at {_session['ended_at']:.0f}")
+    return {"active": False, "started_at": _session["started_at"],
+            "ended_at": _session["ended_at"]}
+
+
+@app.get("/ai/session")
+def session_status():
+    return {"active": _session["active"], "started_at": _session["started_at"],
+            "ended_at": _session["ended_at"]}
 
 
 @app.post("/ai/predict", response_model=PredictResponse)
